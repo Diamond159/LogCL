@@ -224,7 +224,7 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
             writer.writerow(row.values())
             
     return all_mrr_raw, all_mrr_filter
-    
+
 
 def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=None):
     # load configuration for grid search the best configuration
@@ -363,15 +363,15 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 # generate history graph
                 history_glist = [build_sub_graph(num_nodes, num_rels, snap, use_cuda, args.gpu) for snap in input_list]
                 triples = torch.from_numpy(output[0]).long().cuda()
-                inverse_triples = torch.from_numpy(inverse_triples).long().cuda() 
-                for id in range(2): 
-                    if id %2 ==0: 
+                inverse_triples = torch.from_numpy(inverse_triples).long().cuda()
+                for id in range(2):
+                    if id %2 ==0:
                         loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, use_cuda)
                     else:
                         loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, use_cuda)
 
                     loss = loss_e+ loss_static +loss_cl
-                
+
                     losses.append(loss.item())
                     losses_e.append(loss_e.item())
                     losses_r.append(loss_r.item())
