@@ -11,11 +11,13 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import random
+
+from src.regularizers import TL
+
 sys.path.append(".")
 from rgcn import utils
-from rgcn.utils import build_sub_graph, build_graph
+from rgcn.utils import build_sub_graph, build_graph, build_sub_graph_static
 from src.rrgcn import RecurrentRGCN
-from src.hyperparameter_range import hp_range
 import torch.nn.modules.rnn
 from collections import defaultdict
 from rgcn.knowledge_graph import _read_triplets_as_list
@@ -36,17 +38,18 @@ def update_dict(subg_arr, s_to_sro, sr_to_sro,sro_to_fre, num_rels):
         
 def e2r(triplets, num_rels):
     # 统计同一个查询实体连接不同的关系
-    src, rel, dst = triplets.transpose()
+    src, rel, dst, time = triplets.transpose()
     # get all relations
     # uniq_e = np.concatenate((src, dst))
     uniq_e = np.unique(src)
     # generate r2e
     e_to_r = defaultdict(set)
-    for j, (src, rel, dst) in enumerate(triplets):
+    for j, (src, rel, dst, time) in enumerate(triplets):
         e_to_r[src].add(rel)
         # e_to_r[dst].add(rel+num_rels)
     r_len = []
     r_idx = []
+    r_time = []
     idx = 0
     for e in uniq_e:
         r_len.append((idx,idx+len(e_to_r[e])))
@@ -55,12 +58,13 @@ def e2r(triplets, num_rels):
     uniq_e = torch.from_numpy(np.array(uniq_e)).long().cuda()
     r_len = torch.from_numpy(np.array(r_len)).long().cuda()
     r_idx = torch.from_numpy(np.array(r_idx)).long().cuda()
-    return [uniq_e, r_len, r_idx]
+    r_time = torch.from_numpy(np.array(r_time)).long().cuda()  # 转换时间信息为张量
+    return [uniq_e, r_len, r_idx, r_time]
 
 def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples,num_nodes, num_rels, use_cuda, gpu):
     # q_to_sro = defaultdict(list)
     q_to_sro = set()
-    inverse_triples = triples[:, [2, 1, 0]]
+    inverse_triples = triples[:, [2, 1, 0, 3]]
     inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
     all_triples = np.concatenate([triples, inverse_triples])
     # ent_set = set(all_triples[:, 0])
@@ -74,10 +78,10 @@ def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples,num_nodes, num_r
     # ent_list = list(ent_set)
     # rel_list = list(set(all_triples[:, 1]))
 
-    inverse_subg = subg_arr[:, [2, 1, 0]]
+    inverse_subg = subg_arr[:, [2, 1, 0, 3]]
     inverse_subg[:, 1] = inverse_subg[:, 1] + num_rels
     subg_triples = np.concatenate([subg_arr, inverse_subg])
-    df = pd.DataFrame(np.array(subg_triples), columns=['src', 'rel', 'dst'])
+    df = pd.DataFrame(np.array(subg_triples), columns=['src', 'rel', 'dst','time'])
     #整合重复三元组并统计三元组的频率，将三元组的频率作为第四列数据
     subg_df = df.groupby(df.columns.tolist()).size().reset_index().rename(columns={0:'freq'}) 
     keys = list(sr_to_sro.keys())
@@ -100,9 +104,9 @@ def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples,num_nodes, num_r
     q_tri = result.to_numpy()
     q_tri_inv = result_inv.to_numpy()
 
-    his_sub = build_graph(num_nodes, num_rels, q_tri, use_cuda, gpu) 
-    his_sub_inv = build_graph(num_nodes, num_rels, q_tri_inv, use_cuda, gpu)
-    return  his_sub,his_sub_inv
+    his_sub, year_tensor, month_tensor, day_tensor = build_graph(num_nodes, num_rels, q_tri, use_cuda, gpu)
+    his_sub_inv,year_tensor_inv, month_tensor_inv, day_tensor_inv = build_graph(num_nodes, num_rels, q_tri_inv, use_cuda, gpu)
+    return  his_sub,his_sub_inv, year_tensor, month_tensor, day_tensor, year_tensor_inv, month_tensor_inv, day_tensor_inv
 
 
 
@@ -143,24 +147,29 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
     # do not have inverse relation in test input
     input_list = [snap for snap in history_list[-args.test_history_len:]]
 
+    # TODO 对时间做处理
     his_list = history_list[:]
     subg_arr = np.concatenate(his_list)
-    sr_to_sro = np.load('./data/{}/his_dict/train_s_r.npy'.format(args.dataset), allow_pickle=True).item()
+    sr_to_sro = np.load('../data/{}/his_dict/train_s_r.npy'.format(args.dataset), allow_pickle=True).item()
 
+    # 修改
     
     for time_idx, test_snap in enumerate(tqdm(test_list)):
         history_glist = [build_sub_graph(num_nodes, num_rels, g, use_cuda, args.gpu) for g in input_list]
-        inverse_triples =test_snap[:, [2, 1, 0]]
+        inverse_triples =test_snap[:, [2, 1, 0, 3]]
         inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
         que_pair =  e2r(test_snap, num_rels)
         que_pair_inv =  e2r(inverse_triples, num_rels)
 
-        sub_snap,sub_snap_inv = get_sample_from_history_graph3(subg_arr, sr_to_sro, test_snap , num_nodes,num_rels,use_cuda, args.gpu)
+
+        sub_snap,sub_snap_inv, year_tensor, month_tensor, day_tensor, year_tensor_inv, month_tensor_inv, day_tensor_inv = get_sample_from_history_graph3(subg_arr, sr_to_sro, test_snap , num_nodes,num_rels,use_cuda, args.gpu)
 
         test_triples_input = torch.LongTensor(test_snap).cuda() if use_cuda else torch.LongTensor(test_snap)
         test_triples_input_inv = torch.LongTensor(inverse_triples).cuda() if use_cuda else torch.LongTensor(inverse_triples)
-        test_triples, final_score = model.predict(que_pair, sub_snap, time_idx, history_glist, num_rels, static_graph, test_triples_input, use_cuda)
-        inv_test_triples, inv_final_score = model.predict(que_pair_inv, sub_snap_inv, time_idx, history_glist, num_rels, static_graph, test_triples_input_inv, use_cuda)
+
+
+        test_triples, final_score = model.predict(que_pair, sub_snap, time_idx, history_glist, num_rels, static_graph, test_triples_input, use_cuda, year_tensor, month_tensor, day_tensor)
+        inv_test_triples, inv_final_score = model.predict(que_pair_inv, sub_snap_inv, time_idx, history_glist, num_rels, static_graph, test_triples_input_inv, use_cuda, year_tensor_inv, month_tensor_inv, day_tensor_inv)
 
         mrr_filter_snap, mrr_snap, rank_raw, rank_filter = utils.get_total_rank(test_triples, final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
         mrr_filter_snap_inv, mrr_snap_inv, rank_raw_inv, rank_filter_inv = utils.get_total_rank(inv_test_triples, inv_final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
@@ -195,8 +204,8 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
     for hit_id in range(len(hit_raw)):
         all_hit_raw.append((hit_raw[hit_id]+hit_raw_inv[hit_id])/2)
         all_hit_filter.append((hit_filter[hit_id]+hit_filter_inv[hit_id])/2)
-    print("(all_raw) MRR, Hits@ (1,3,5):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_raw.item(), all_hit_raw[0],all_hit_raw[1],all_hit_raw[2]))
-    print("(all_filter) MRR, Hits@ (1,3,5):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_filter.item(), all_hit_filter[0],all_hit_filter[1],all_hit_filter[2]))
+    print("(all_raw) MRR, Hits@ (1,3,10):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_raw.item(), all_hit_raw[0],all_hit_raw[1],all_hit_raw[2]))
+    print("(all_filter) MRR, Hits@ (1,3,10):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_filter.item(), all_hit_filter[0],all_hit_filter[1],all_hit_filter[2]))
     
     # 文件转储
     if mode == "test": # test模式写入，train模式忽略
@@ -244,8 +253,8 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     valid_list = utils.split_by_time(data.valid)
     test_list = utils.split_by_time(data.test)
 
-    num_nodes = data.num_nodes
-    num_rels = data.num_rels
+    num_nodes = data.num_nodes      # 实体的数量
+    num_rels = data.num_rels        # 关系的数量
 
     all_ans_list_test = utils.load_all_answers_for_time_filter(data.test, num_rels, num_nodes, False)
     all_ans_list_r_test = utils.load_all_answers_for_time_filter(data.test, num_rels, num_nodes, True)
@@ -260,7 +269,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     use_cuda = args.gpu >= 0 and torch.cuda.is_available()
 
     if args.add_static_graph:
-        static_triples = np.array(_read_triplets_as_list("./data/" + args.dataset + "/e-w-graph.txt", {}, {}, load_time=False))
+        static_triples = np.array(_read_triplets_as_list("../data/" + args.dataset + "/e-w-graph.txt", {}, {}, load_time=False))
         num_static_rels = len(np.unique(static_triples[:, 1]))
         num_words = len(np.unique(static_triples[:, 2]))
         static_triples[:, 2] = static_triples[:, 2] + num_nodes 
@@ -310,7 +319,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
         model.cuda()
 
     if args.add_static_graph:
-        static_graph = build_sub_graph(len(static_node_id), num_static_rels, static_triples, use_cuda, args.gpu)
+        static_graph = build_sub_graph_static(len(static_node_id), num_static_rels, static_triples, use_cuda, args.gpu)
 
     # optimizer
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
@@ -340,23 +349,25 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
             losses_r = []
             losses_static = []
 
+            time_reg = TL(1e-02)
+
             idx = [_ for _ in range(len(train_list))]
 
             for train_sample_num in tqdm(idx):
                 if train_sample_num == 0: continue
-                output = train_list[train_sample_num:train_sample_num+1]
+                output = train_list[train_sample_num:train_sample_num+1]   # 获取当前训练样本的输出
                 if train_sample_num - args.train_history_len<0:
-                    input_list = train_list[0: train_sample_num]
+                    input_list = train_list[0: train_sample_num]    # 如果当前训练样本编号小于训练历史长度，则输入列表为从第一个样本到当前样本之前的所有样本   默认历史长度为 10
                 else:
                     input_list = train_list[train_sample_num - args.train_history_len:
-                                        train_sample_num]
+                                        train_sample_num]    # 否则，输入列表为从当前样本编号减去训练历史长度到当前样本之前的所有样本
 
-                subgraph_arr = np.load('./data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
-                subgraph_arr_inv = np.load('./data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
-                subg_snap = build_graph(num_nodes, num_rels, subgraph_arr, use_cuda, args.gpu)   #取出采样子图
-                subg_snap_inv = build_graph(num_nodes, num_rels, subgraph_arr_inv, use_cuda, args.gpu)
+                subgraph_arr = np.load('../data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
+                subgraph_arr_inv = np.load('../data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
+                subg_snap, year_tensor, month_tensor, day_tensor = build_graph(num_nodes, num_rels, subgraph_arr, use_cuda, args.gpu)   #取出采样子图
+                subg_snap_inv, year_tensor_inv, month_tensor_inv, day_tensor_inv = build_graph(num_nodes, num_rels, subgraph_arr_inv, use_cuda, args.gpu)
 
-                inverse_triples = output[0][:, [2, 1, 0]]
+                inverse_triples = output[0][:, [2, 1, 0, 3]]
                 inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
                 que_pair =  e2r(output[0], num_rels)
                 que_pair_inv =  e2r(inverse_triples, num_rels)
@@ -366,11 +377,14 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 inverse_triples = torch.from_numpy(inverse_triples).long().cuda()
                 for id in range(2):
                     if id %2 ==0:
-                        loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, use_cuda)
+                        loss_e, loss_r, loss_static, loss_cl, loss_t = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, use_cuda, year_tensor, month_tensor, day_tensor)
                     else:
-                        loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, use_cuda)
+                        loss_e, loss_r, loss_static, loss_cl, loss_t = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, use_cuda, year_tensor_inv, month_tensor_inv, day_tensor_inv)
 
-                    loss = loss_e+ loss_static +loss_cl
+
+                    # loss_t = loss_t.mean()
+                    l_t = time_reg.forward(loss_t)
+                    loss = loss_e+ loss_static +loss_cl + l_t
 
                     losses.append(loss.item())
                     losses_e.append(loss_e.item())
@@ -410,6 +424,8 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                         best_mrr = mrr_filter
                         torch.save({'state_dict': model.state_dict(), 'epoch': epoch}, model_state_file)
             torch.cuda.empty_cache()
+
+        # 测试最好的模型
         mrr_raw, mrr_filter = test(model, 
                             train_list+valid_list,
                             test_list, 
@@ -528,6 +544,33 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
     print(args)
+    # %%
+    # 定义参数变量
+    args.dataset = "ICEWS14"  # 数据集名称
+    args.train_history_len = 7  # 训练历史长度
+    args.test_history_len = 7  # 测试历史长度
+    args.dilate_len = 1  # 扩张历史图长度
+    args.lr = 0.001  # 学习率
+    args.n_layers = 2  # 传播层数
+    args.evaluate_every = 1  # 每n轮进行评估
+    args.gpu = 0  # GPU ID
+    args.n_hidden = 200  # 隐藏单元数量
+    args.self_loop = True  # 是否使用自环
+    args.decoder = "convtranse"  # 解码器类型
+    args.encoder = "uvrgcn"  # 编码器类型
+    args.layer_norm = True  # 是否使用层归一化
+    args.weight = 0.5  # 静态约束权重
+    args.entity_prediction = True  # 是否添加实体预测损失
+    args.angle = 10  # 演变速度
+    args.discount = 1  # 静态约束的折扣
+    args.pre_weight = 0.9  # 实体预测任务的权重
+    args.pre_type = "all"  # 预训练类型
+    args.add_static_graph = True  # 是否使用静态图信息
+    args.temperature = 0.03  # 对比学习的温度
+    args.batch_size = 32  # 批量大小
+
+
+
     args.__dict__["test_history_len"] = args.__dict__["train_history_len"]
 
     run_experiment(args)

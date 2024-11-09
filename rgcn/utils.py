@@ -4,12 +4,16 @@ Most code is adapted from authors' implementation of RGCN link prediction:
 https://github.com/MichSchli/RelationPrediction
 
 """
+from datetime import datetime, timedelta
+
 import numpy as np
 import torch
 import dgl
 from tqdm import tqdm
 import rgcn.knowledge_graph as knwlgrh
 from collections import defaultdict
+
+import time
 
 
 #######################################################################
@@ -53,7 +57,7 @@ def filter_score(test_triples, score, all_ans):
         return score
     test_triples = test_triples.cpu()
     for _, triple in enumerate(test_triples):
-        h, r, t = triple
+        h, r, t = triple[:3]
         ans = list(all_ans[h.item()][r.item()])
         ans.remove(t.item())
         ans = torch.LongTensor(ans)
@@ -65,7 +69,7 @@ def filter_score_r(test_triples, score, all_ans):
         return score
     test_triples = test_triples.cpu()
     for _, triple in enumerate(test_triples):
-        h, r, t = triple
+        h, r, t = triple[:3]
         ans = list(all_ans[h.item()][t.item()])
         # print(h, r, t)
         # print(ans)
@@ -76,6 +80,25 @@ def filter_score_r(test_triples, score, all_ans):
 
 
 def r2e(triplets, num_rels):
+    src, rel, dst, time = triplets.transpose()
+    # get all relations
+    uniq_r = np.unique(rel)
+    uniq_r = np.concatenate((uniq_r, uniq_r+num_rels))
+    # generate r2e
+    r_to_e = defaultdict(set)
+    for j, (src, rel, dst,time) in enumerate(triplets):
+        r_to_e[rel].add(src)
+        r_to_e[rel+num_rels].add(src)
+    r_len = []
+    e_idx = []
+    idx = 0
+    for r in uniq_r:
+        r_len.append((idx,idx+len(r_to_e[r])))
+        e_idx.extend(list(r_to_e[r]))
+        idx += len(r_to_e[r])
+    return uniq_r, r_len, e_idx
+
+def r2e_3(triplets, num_rels):
     src, rel, dst = triplets.transpose()
     # get all relations
     uniq_r = np.unique(rel)
@@ -112,7 +135,32 @@ def build_graph(num_nodes, num_rels, triples, use_cuda, gpu):
         return norm
     # print("the num of dict", len(sro_to_fre))
     # triples = np.array(triples)
-    src, rel, dst,fre= triples.transpose()
+    # 从三元组中提取源节点、关系、目标节点、时间和频率
+    src, rel, dst, days, fre = triples.transpose()
+
+    # 存储年、月、日和相对天数
+    years = []
+    months = []
+    day_list = []  # 使用 day_list 以避免与输入的 days 冲突
+
+    # 将天数转换为年、月、日
+    start_date = datetime(2014, 1, 1)  # 基准日期
+
+    # 限制最大条目数
+    max_entries = 104
+
+    for day in days:
+        if len(years) >= max_entries:  # 检查当前长度是否达到限制
+            break  # 达到限制时退出循环
+        event_date = start_date + timedelta(days=int(day))
+        years.append(event_date.year-2014)
+        months.append(event_date.month)
+        day_list.append(event_date.day)
+
+    # 转换为张量
+    year_tensor = torch.LongTensor(years).to(0)
+    month_tensor = torch.LongTensor(months).to(0)
+    day_tensor = torch.LongTensor(day_list).to(0)
 
     g = dgl.graph((src, dst), num_nodes=num_nodes)
     # g.add_nodes(num_nodes)
@@ -124,12 +172,57 @@ def build_graph(num_nodes, num_rels, triples, use_cuda, gpu):
     g.edata['type'] = torch.LongTensor(rel)
     g.edata['fre'] = torch.LongTensor(fre)
 
+    # 在频率之前添加时间信息作为边特征 TODO  添加原始的时间特征
+    # 将年、月、日作为边特征添加到图中
+    # g.edata['year'] = year_tensor
+    # g.edata['month'] = month_tensor
+    # g.edata['day'] = day_tensor
+
     if use_cuda:
         g.to(gpu)
-    return g
+    return g, year_tensor, month_tensor, day_tensor
 
 
 def build_sub_graph(num_nodes, num_rels, triples, use_cuda, gpu):
+    """
+    :param node_id: node id in the large graph
+    :param num_rels: number of relation
+    :param src: relabeled src id
+    :param rel: original rel id
+    :param dst: relabeled dst id
+    :param use_cuda:
+    :return:
+    """
+    def comp_deg_norm(g):
+        in_deg = g.in_degrees(range(g.number_of_nodes())).float()
+        in_deg[torch.nonzero(in_deg == 0).view(-1)] = 1
+        norm = 1.0 / in_deg
+        return norm
+
+    src, rel, dst, time = triples.transpose()
+    src, dst = np.concatenate((src, dst)), np.concatenate((dst, src))
+    rel = np.concatenate((rel, rel + num_rels))
+
+    g = dgl.DGLGraph()
+    g.add_nodes(num_nodes)
+    g.add_edges(src, dst)
+    norm = comp_deg_norm(g)
+    node_id = torch.arange(0, num_nodes, dtype=torch.long).view(-1, 1)
+    g.ndata.update({'id': node_id, 'norm': norm.view(-1, 1)})
+    g.apply_edges(lambda edges: {'norm': edges.dst['norm'] * edges.src['norm']})
+    g.edata['type'] = torch.LongTensor(rel)
+
+    uniq_r, r_len, r_to_e = r2e(triples, num_rels)
+    g.uniq_r = uniq_r
+    g.r_to_e = r_to_e
+    g.r_len = r_len
+    if use_cuda:
+        g.to(gpu)
+        g.r_to_e = torch.from_numpy(np.array(r_to_e))
+    return g
+
+
+def build_sub_graph_static(num_nodes, num_rels, triples, use_cuda, gpu):
     """
     :param node_id: node id in the large graph
     :param num_rels: number of relation
@@ -158,7 +251,7 @@ def build_sub_graph(num_nodes, num_rels, triples, use_cuda, gpu):
     g.apply_edges(lambda edges: {'norm': edges.dst['norm'] * edges.src['norm']})
     g.edata['type'] = torch.LongTensor(rel)
 
-    uniq_r, r_len, r_to_e = r2e(triples, num_rels)
+    uniq_r, r_len, r_to_e = r2e_3(triples, num_rels)
     g.uniq_r = uniq_r
     g.r_to_e = r_to_e
     g.r_len = r_len
@@ -166,6 +259,7 @@ def build_sub_graph(num_nodes, num_rels, triples, use_cuda, gpu):
         g.to(gpu)
         g.r_to_e = torch.from_numpy(np.array(r_to_e))
     return g
+
 
 def get_total_rank(test_triples, score, all_ans, eval_bz, rel_predict=0):
     num_triples = len(test_triples)
@@ -210,7 +304,7 @@ def stat_ranks(rank_list, method):
     for hit in hits:
         avg_count = torch.mean((total_rank <= hit).float())
         hit_list.append(avg_count.item())
-    print("({}) MRR, Hits@ (1,3,5):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format(method, mrr.item(), hit_list[0],hit_list[1],hit_list[2]))
+    print("({}) MRR, Hits@ (1,3,10):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format(method, mrr.item(), hit_list[0],hit_list[1],hit_list[2]))
     return mrr,hit_list
 
 
@@ -296,7 +390,7 @@ def load_all_answers(total_data, num_rel):
         add_object(s, o, r, all_objects, num_rel=0)
     return all_objects, all_subjects
 
-
+# 用于处理输入数据，并存储所有 (关系, 对象) 查询的主体和所有 (主体, 关系) 查询的对象。如果 rel_p 设置为 True，它还会存储关系。
 def load_all_answers_for_filter(total_data, num_rel, rel_p=False):
     # store subjects for all (rel, object) queries and
     # objects for all (subject, rel) queries
@@ -318,7 +412,7 @@ def load_all_answers_for_filter(total_data, num_rel, rel_p=False):
             add_object(s, o, r, all_ans, num_rel=0)
     return all_ans
 
-
+# 用于根据时间戳将数据分割成多个快照，并为每个快照生成所有答案的列表
 def load_all_answers_for_time_filter(total_data, num_rels, num_nodes, rel_p=False):
     all_ans_list = []
     all_snap = split_by_time(total_data)
@@ -355,7 +449,7 @@ def split_by_time(data):
                 snapshot_list.append(np.array(snapshot).copy())
                 snapshots_num += 1
             snapshot = []
-        snapshot.append(train[:3])
+        snapshot.append([train[0], train[1], train[2], t])  # 包含时间的四元组
     # 加入最后一个shapshot
     if len(snapshot) > 0:
         snapshot_list.append(np.array(snapshot).copy())
@@ -396,7 +490,7 @@ def load_data(dataset, bfs_level=3, relabel=False):
         return knwlgrh.load_link(dataset)
     elif dataset in ['ICEWS18', 'ICEWS14', "GDELT", "SMALL", "ICEWS14s", "ICEWS05-15","YAGO",
                      "WIKI"]:
-        return knwlgrh.load_from_local("./data", dataset)
+        return knwlgrh.load_from_local("../data", dataset)  # 从本地加载数据 添加上一级目录
     else:
         raise ValueError('Unknown dataset: {}'.format(dataset))
 

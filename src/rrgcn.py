@@ -245,9 +245,42 @@ class RecurrentRGCN(nn.Module):
             # self.decoder_ob1 = ConvTransE(num_ents, h_dim, input_dropout, hidden_dropout, feat_dropout)
             self.rdecoder = ConvTransR(num_rels, h_dim, input_dropout, hidden_dropout, feat_dropout)
         else:
-            raise NotImplementedError 
+            raise NotImplementedError
 
-    def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph, use_cuda):
+        # 增加时间处理
+        # self.year_embed = torch.nn.Embedding(self.p.n_year, 200, padding_idx=None)
+        # self.month_embed = torch.nn.Embedding(self.p.n_month, 200, padding_idx=None)
+        # self.day_embed = torch.nn.Embedding(self.p.n_day, 200, padding_idx=None)
+
+        self.time_encoder = torch.nn.GRU(input_size=200, hidden_size=200, bidirectional=False,
+                                         batch_first=True)
+        # * add
+        self.smiplelinear_y = nn.Linear(200, 1, bias=False)
+        self.smiplelinear_m = nn.Linear(200, 1, bias=False)
+        self.smiplelinear_d = nn.Linear(200, 1, bias=False)
+
+        self.simple_t = nn.Linear(3 * 200, 200)
+        self.simple_r = nn.Linear(2 * 200, 200)
+        self.act_t = nn.LeakyReLU(0.2)
+        self.act_r = nn.LeakyReLU(0.2)
+
+        self.year_embed = torch.nn.Embedding(1, 200, padding_idx=None)
+        self.month_embed = torch.nn.Embedding(12, 200, padding_idx=None)
+        self.day_embed = torch.nn.Embedding(365, 200, padding_idx=None)
+
+        self.bnfn = nn.BatchNorm1d(200)
+        self.hidden_drop = nn.Dropout(0.2)
+
+    def get_emb(self, time):
+        return torch.nn.Embedding(time, 200, padding_idx=None)
+
+
+    def fc(self, x):
+        """Fully connected layer forward pass, ensuring the input tensor is on the same device as the layer's parameters."""
+        fc_layer = nn.Linear(400, 200).to(0)
+        return fc_layer(x)
+
+    def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph, use_cuda, year_tensor, month_tensor, day_tensor):
 
         if self.use_static:
             static_graph = static_graph.to(self.gpu)
@@ -271,6 +304,17 @@ class RecurrentRGCN(nn.Module):
         att_embs = []
         his_temp_embs =[]
         his_rel_embs =[]
+
+        # 提取时间信息
+        # years = sub_graph.edata['year']
+        # months = sub_graph.edata['month']
+        # days = sub_graph.edata['day']
+        #
+        # num_years = years.max().item()
+        # num_months = months.max().item()
+        # num_days = days.max().item()
+
+
         if self.pre_type=="all":
             for i, g in enumerate(g_list):
                 g = g.to(self.gpu)
@@ -284,6 +328,82 @@ class RecurrentRGCN(nn.Module):
                     x_mean = torch.mean(x, dim=0, keepdim=True)
                     x_input[r_idx] = x_mean
                 x_input = self.emb_rel + x_input
+
+                # %%     基本都要进行修改
+                # 整合时间特征
+                # time_weight = F.softmax(self.time_gate(torch.cat([years[g.r_to_e], months[g.r_to_e], days[g.r_to_e]], dim=1)), dim=-1)
+                # 整合时间特征（GRL）
+                # 获取嵌入
+                # TODO 这里需要修改
+
+                y_emb = self.year_embed(year_tensor)
+                m_emb = self.month_embed(month_tensor)
+                d_emb = self.day_embed(day_tensor)
+
+                # 确保输入张量位于与 GRU 参数相同的设备上
+                time_emb = self.time_encoder(torch.stack([y_emb, m_emb, d_emb], 1))[0]
+
+                # 初始化 r_emb
+                r_emb = self.emb_rel
+                y_emb = time_emb[:, 0, :]
+                m_emb = time_emb[:, 1, :]
+                d_emb = time_emb[:, 2, :]
+                t_emb = self.act_t(self.simple_t(torch.cat([y_emb, m_emb, d_emb], dim=-1)))
+
+                # 确保 t_emb 的大小与 self.emb_rel 匹配
+                if r_emb.size(0) != t_emb.size(0):
+                    if r_emb.size(0) > t_emb.size(0):
+                        r_emb = torch.nn.Parameter(r_emb[:t_emb.size(0)])
+                    else:
+                        t_emb = F.pad(t_emb, (0, 0, 0, r_emb.size(0) - t_emb.size(0)))
+
+                r_emb = self.act_r(self.simple_r(torch.cat([r_emb, t_emb], dim=-1)))
+
+                # 确保 r_emb 的大小与 self.h 匹配
+                if self.h.size(0) != r_emb.size(0):
+                    if self.h.size(0) > r_emb.size(0):
+                        r_emb = F.pad(r_emb, (0, 0, 0, self.h.size(0) - r_emb.size(0)))
+                    else:
+                        self.h = self.h[:r_emb.size(0)]
+
+                # 将 h_emb 和 r_emb 进行整合
+                comb_emb = torch.cat([self.h, r_emb], dim=1)
+
+                # 自适应粒度平衡（AGB）
+                comb_y = self.smiplelinear_y(y_emb)
+                comb_m = self.smiplelinear_m(m_emb)
+                comb_d = self.smiplelinear_d(d_emb)
+                comb_time_emb = torch.cat([comb_y, comb_m, comb_d], dim=1)
+                total_w = torch.softmax(comb_time_emb, dim=1)
+
+                # 使用全连接层处理组合嵌入
+                x = self.fc(comb_emb)
+
+                # 确保 comb_y 和 comb_m 的行数一致
+                desired_batch_size = min(comb_y.shape[0], comb_m.shape[0], x.shape[0])  # 获取最小值以避免超出范围
+
+                # 调整 x 的大小以匹配 comb_y 和 comb_m 的行数
+                x = x[:desired_batch_size, :]  # 确保 x 的行数与 desired_batch_size 一致
+
+                # 确保这里的切片与 x 的行数匹配
+                wy = total_w[:desired_batch_size, 0].unsqueeze(1).repeat(1, comb_y.shape[1])
+                wm = total_w[:desired_batch_size, 1].unsqueeze(1).repeat(1, comb_m.shape[1])
+                wd = total_w[:desired_batch_size, 2].unsqueeze(1).repeat(1, x.shape[1])
+
+                # 计算加法时确保维度匹配
+                wy_comb_y = wy * comb_y[:desired_batch_size, :].expand(-1, 200)  # 扩展到 (104, 200)
+                wm_comb_m = wm * comb_m[:desired_batch_size, :].expand(-1, 200)  # 扩展到 (104, 200)
+
+                # 最终计算
+                x = wy_comb_y + wm_comb_m + wd * x  # 现在所有张量均为 (104, 200)
+
+                x = self.hidden_drop(x)
+                x = self.bnfn(x)
+                x = torch.relu(x)
+
+                pred = torch.sigmoid(x)
+                # %%
+                print()
                 current_h = self.rgcn.forward(g, self.h, [self.emb_rel, self.emb_rel])
                 current_h = F.normalize(current_h) if self.layer_norm else current_h
                 # current_h1 = F.sigmoid(self.w6(current_h))   # 让相应的维度大小早）0~1之间，通过mask矩阵获取query time 出现的实体，其他实体设置为0
@@ -299,6 +419,7 @@ class RecurrentRGCN(nn.Module):
                     self.h_0 = F.normalize(self.h_0) if self.layer_norm else self.h_0
                     # self.hr = self.relation_cell(x_input, self.hr)  # 第2层输出==下一时刻第一层输入
                     # self.hr = F.normalize(self.hr) if self.layer_norm else self.hr
+
                 time_weight = F.sigmoid(torch.mm(x_input, self.time_gate_weight) + self.time_gate_bias)
                 self.hr = time_weight * x_input + (1-time_weight) * self.emb_rel
                 self.hr = F.normalize(self.hr) if self.layer_norm else self.hr
@@ -316,10 +437,31 @@ class RecurrentRGCN(nn.Module):
             self.hr = None
             history_emb = None
 
-        return history_emb, static_emb, self.hr, his_emb, his_r_emb,his_temp_embs,his_rel_embs
+        return history_emb, static_emb, self.hr, his_emb, his_r_emb,his_temp_embs,his_rel_embs,pred
 
+    # TODO 重写temporal_emb函数
+    def temporal_emb(self, y_emb, m_emb, d_emb):
 
-    def predict(self,que_pair, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets, use_cuda):
+        days_in_month = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
+        combined_list = []
+        init_day_data = d_emb.weight
+        init_month_data = m_emb.weight
+        init_y_data = y_emb.weight
+        for month_index in range(12):
+            days_count = torch.tensor([days_in_month[month_index]]).cuda()
+            y_data = init_y_data.repeat(days_count, 1)
+            month_data = init_month_data[month_index].repeat(days_count, 1)
+            day_data = init_day_data[:days_count]
+            combined_data = self.act_t(self.simple_t(torch.cat((y_data, month_data, day_data), dim=1)))
+            # Append the relevant slice from the days_tensor
+            combined_list.append(combined_data)
+
+            # Concatenate the slices to form the final [365, 200] tensor
+        final_tensor = torch.vstack(combined_list)
+
+        return final_tensor
+
+    def predict(self,que_pair, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets, use_cuda, year_tensor, month_tensor, day_tensor):
         with torch.no_grad():
             all_triples = test_triplets
             
@@ -340,18 +482,23 @@ class RecurrentRGCN(nn.Module):
             query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
             query_mask[uniq_e] = query_emb
 
-            embedding, _, r_emb, his_emb, his_r_emb,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, use_cuda)
+            embedding, _, r_emb, his_emb, his_r_emb,_,_,pred = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, use_cuda, year_tensor, month_tensor, day_tensor)
+
+            # TODO 预测时添加对时间的处理
 
             if self.pre_type == "all":
 
-                scores_ob,_= self.decoder_ob.forward( embedding,r_emb, all_triples,  his_emb, self.pre_weight, self.pre_type)
+                scores_ob,_= self.decoder_ob.forward(embedding,r_emb, all_triples,  his_emb, self.pre_weight, self.pre_type)
                 score_seq = F.softmax(scores_ob, dim=1)
                 score_en =score_seq
+
             scores_en = torch.log(score_en)
+            # TODO 预测时添加对时间的处理
+
             return all_triples, scores_en
 
 
-    def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, use_cuda):
+    def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, use_cuda, year_tensor, month_tensor, day_tensor):
         """
         :param glist:
         :param triplets:
@@ -363,6 +510,7 @@ class RecurrentRGCN(nn.Module):
         loss_cl = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_rel = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_static = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
+        loss_t = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         
         all_triples = triples
 
@@ -388,9 +536,10 @@ class RecurrentRGCN(nn.Module):
         query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1)) 
         query_mask[uniq_e] = query_emb
 
-        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, use_cuda)
+        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs, time_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, use_cuda, year_tensor, month_tensor, day_tensor)
 
 
+        # %%
 
         if self.pre_type == "all":
             scores_ob, _= self.decoder_ob.forward(embedding, r_emb, all_triples, his_emb,self.pre_weight, self.pre_type)
@@ -411,9 +560,12 @@ class RecurrentRGCN(nn.Module):
                 query2 = torch.concat([evolve_emb[all_triples[:, 0]], his_rel_embs[id][all_triples[:, 1]]],dim=1)
                 x1 = self.w_cl(query)
                 x2 = self.w_cl(query2)
-                loss_cl += self.get_loss_conv(x1, x2) 
+                loss_cl += self.get_loss_conv(x1, x2)
+         ### --------------计算时间损失-----------------------
 
-        return loss_ent, loss_rel, loss_static, loss_cl
+        loss_t = self.temporal_emb(self.year_embed, self.month_embed, self.day_embed)
+
+        return loss_ent, loss_rel, loss_static, loss_cl, loss_t
 
     def all_GCN(self,ent_emb, sub_graph, use_cuda):
         sub_graph = sub_graph.to(self.gpu)
