@@ -210,7 +210,7 @@ def stat_ranks(rank_list, method):
     for hit in hits:
         avg_count = torch.mean((total_rank <= hit).float())
         hit_list.append(avg_count.item())
-    print("({}) MRR, Hits@ (1,3,5):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format(method, mrr.item(), hit_list[0],hit_list[1],hit_list[2]))
+    print("({}) MRR, Hits@ (1,3,10):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format(method, mrr.item(), hit_list[0],hit_list[1],hit_list[2]))
     return mrr,hit_list
 
 

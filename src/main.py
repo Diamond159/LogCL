@@ -194,8 +194,8 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
     for hit_id in range(len(hit_raw)):
         all_hit_raw.append((hit_raw[hit_id]+hit_raw_inv[hit_id])/2)
         all_hit_filter.append((hit_filter[hit_id]+hit_filter_inv[hit_id])/2)
-    print("(all_raw) MRR, Hits@ (1,3,5):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_raw.item(), all_hit_raw[0],all_hit_raw[1],all_hit_raw[2]))
-    print("(all_filter) MRR, Hits@ (1,3,5):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_filter.item(), all_hit_filter[0],all_hit_filter[1],all_hit_filter[2]))
+    print("(all_raw) MRR, Hits@ (1,3,10):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_raw.item(), all_hit_raw[0],all_hit_raw[1],all_hit_raw[2]))
+    print("(all_filter) MRR, Hits@ (1,3,10):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_filter.item(), all_hit_filter[0],all_hit_filter[1],all_hit_filter[2]))
     
     # 文件转储
     if mode == "test": # test模式写入，train模式忽略
@@ -526,8 +526,36 @@ if __name__ == '__main__':
 
 
     args = parser.parse_args()
+
+
+    # %%
+    # 定义参数变量
+    args.dataset = "ICEWS14"  # 数据集名称
+    args.train_history_len = 7  # 训练历史长度
+    args.test_history_len = 7  # 测试历史长度
+    args.dilate_len = 1  # 扩张历史图长度
+    args.lr = 0.001  # 学习率
+    args.n_layers = 2  # 传播层数
+    args.evaluate_every = 1  # 每n轮进行评估
+    args.gpu = 0  # GPU ID
+    args.n_hidden = 200  # 隐藏单元数量
+    args.self_loop = True  # 是否使用自环
+    args.decoder = "convtranse"  # 解码器类型
+    args.encoder = "uvrgcn"  # 编码器类型
+    args.layer_norm = True  # 是否使用层归一化
+    args.weight = 0.5  # 静态约束权重
+    args.entity_prediction = True  # 是否添加实体预测损失
+    args.angle = 10  # 演变速度
+    args.discount = 1  # 静态约束的折扣
+    args.pre_weight = 0.9  # 实体预测任务的权重
+    args.pre_type = "all"  # 预训练类型
+    args.add_static_graph = True  # 是否使用静态图信息
+    args.temperature = 0.03  # 对比学习的温度
+    args.batch_size = 32  # 批量大小
+
     print(args)
     args.__dict__["test_history_len"] = args.__dict__["train_history_len"]
+
 
     run_experiment(args)
 

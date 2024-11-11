@@ -533,7 +533,7 @@ def _read_dictionary(filename):
 
 
 def _read_triplets(filename):
-    with open(filename, 'r+') as f:
+    with open(filename, 'r+', encoding='utf-8') as f:
         for line in f:
             processed_line = line.strip().split('\t')
             yield processed_line
