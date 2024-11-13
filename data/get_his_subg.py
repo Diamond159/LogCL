@@ -15,7 +15,8 @@ def get_sample_from_history_graph(subg_arr,s_to_sro, sr_to_sro,sro_to_fre, tripl
     all_triples = np.concatenate([triples, inverse_triples])
     # ent_set = set(all_triples[:, 0])
     src_set = set(triples[:, 0])
-    dst_set = set(triples[:, 0])
+    # TODO 原作者： dst_set = set(triples[:, 0])
+    dst_set = set(triples[:, 2])
 
     # ----------------二阶邻居采样-----------------------
     # er_list = list(set([(tri[0],tri[1]) for tri in all_triples]))
@@ -158,7 +159,7 @@ for dataset in dataset_list:
     mkdirs(save_dir_sub)
     mkdirs(save_dir_subg)
 
-    # f2 = open('./data/{}/copy_seq_graph/train_h_r_copy_seq.pkl'.format(args.dataset), 'rb')
+    # f2 = open('../data/{}/copy_seq_graph/train_h_r_copy_seq.pkl'.format(args.dataset), 'rb')
     # que_subg = pickle.load(f2)
     sr_to_sro = defaultdict(set)
     s_to_sro = defaultdict(set)
@@ -198,7 +199,7 @@ for dataset in dataset_list:
 #     his_arr = np.concatenate(sample_seq_graph)
 #     # que_subg = his_graph_sample1(his_arr, triple[0], num_r,que_subg_list, que_subg_len)
 #     que_subg = get_sample_from_history_graph3(his_arr, triple[0], num_rels,que_subg_list, que_subg_len)
-#     # with open('./data/{}/copy_seq_graph/train_h_r_copy_seq_{}.pkl'.format(args.dataset, id), 'wb') as f:
+#     # with open('../data/{}/copy_seq_graph/train_h_r_copy_seq_{}.pkl'.format(args.dataset, id), 'wb') as f:
 #     #     pickle.dump(que_subg, f)
 # with open('./{}/copy_seq_graph/train_h_r_copy_seq.pkl'.format(dataset), 'wb') as f1:
 #     pickle.dump(que_subg, f1)

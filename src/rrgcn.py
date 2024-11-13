@@ -245,7 +245,7 @@ class RecurrentRGCN(nn.Module):
             # self.decoder_ob1 = ConvTransE(num_ents, h_dim, input_dropout, hidden_dropout, feat_dropout)
             self.rdecoder = ConvTransR(num_rels, h_dim, input_dropout, hidden_dropout, feat_dropout)
         else:
-            raise NotImplementedError 
+            raise NotImplementedError
 
     def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph, use_cuda):
 
@@ -261,8 +261,8 @@ class RecurrentRGCN(nn.Module):
             static_emb = None
 
         #-----------------全局历史建模-------------------------------------
-        self.his_ent, subg_index = self.all_GCN(self.h, sub_graph,use_cuda)
-        his_r_emb = F.normalize(self.emb_rel)
+        self.his_ent, subg_index = self.all_GCN(self.h, sub_graph,use_cuda)     # 全局历史实体嵌入his_ent
+        his_r_emb = F.normalize(self.emb_rel)  # 全局历史关系嵌入his_r_emb
         his_att = F.softmax(self.w5(query_mask+ self.his_ent),dim=1)
         his_emb = his_att*self.his_ent
         his_emb = F.normalize(his_emb)

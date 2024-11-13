@@ -144,7 +144,7 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
 
     his_list = history_list[:]
     subg_arr = np.concatenate(his_list)
-    sr_to_sro = np.load('./data/{}/his_dict/train_s_r.npy'.format(args.dataset), allow_pickle=True).item()
+    sr_to_sro = np.load('../data/{}/his_dict/train_s_r.npy'.format(args.dataset), allow_pickle=True).item()
 
     
     for time_idx, test_snap in enumerate(tqdm(test_list)):
@@ -259,7 +259,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     use_cuda = args.gpu >= 0 and torch.cuda.is_available()
 
     if args.add_static_graph:
-        static_triples = np.array(_read_triplets_as_list("./data/" + args.dataset + "/e-w-graph.txt", {}, {}, load_time=False))
+        static_triples = np.array(_read_triplets_as_list("../data/" + args.dataset + "/e-w-graph.txt", {}, {}, load_time=False))
         num_static_rels = len(np.unique(static_triples[:, 1]))
         num_words = len(np.unique(static_triples[:, 2]))
         static_triples[:, 2] = static_triples[:, 2] + num_nodes 
@@ -344,14 +344,14 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
             for train_sample_num in tqdm(idx):
                 if train_sample_num == 0: continue
                 output = train_list[train_sample_num:train_sample_num+1]
-                if train_sample_num - args.train_history_len<0:
+                if train_sample_num - args.train_history_len < 0:
                     input_list = train_list[0: train_sample_num]
                 else:
                     input_list = train_list[train_sample_num - args.train_history_len:
-                                        train_sample_num]
+                                       train_sample_num]
 
-                subgraph_arr = np.load('./data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
-                subgraph_arr_inv = np.load('./data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
+                subgraph_arr = np.load('../data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
+                subgraph_arr_inv = np.load('../data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
                 subg_snap = build_graph(num_nodes, num_rels, subgraph_arr, use_cuda, args.gpu)   #取出采样子图
                 subg_snap_inv = build_graph(num_nodes, num_rels, subgraph_arr_inv, use_cuda, args.gpu)
 
