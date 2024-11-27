@@ -105,7 +105,7 @@ def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples,num_nodes, num_r
 
 
 
-def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_list, all_ans_r_list, model_name, static_graph, mode):
+def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_list, all_ans_r_list, model_name, static_graph, mode):
     """
     :param model: model used to test
     :param history_list:    all input history snap shot list, not include output label train list or valid list
@@ -142,12 +142,19 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
     # do not have inverse relation in test input
     input_list = [snap for snap in history_list[-args.test_history_len:]]
 
+    start_time = len(history_list)
+
     his_list = history_list[:]
     subg_arr = np.concatenate(his_list)
     sr_to_sro = np.load('../data/{}/his_dict/train_s_r.npy'.format(args.dataset), allow_pickle=True).item()
 
     
     for time_idx, test_snap in enumerate(tqdm(test_list)):
+        tc = start_time + time_idx
+        tlist = list(range(tc - history_len, tc))
+        # tlist = [min(start_time-args.start_history_len-1,t) for t in tlist]
+        tlist = torch.Tensor(tlist).cuda()
+
         history_glist = [build_sub_graph(num_nodes, num_rels, g, use_cuda, args.gpu) for g in input_list]
         inverse_triples =test_snap[:, [2, 1, 0]]
         inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
@@ -158,8 +165,10 @@ def test(model, history_list, test_list, num_rels, num_nodes, use_cuda, all_ans_
 
         test_triples_input = torch.LongTensor(test_snap).cuda() if use_cuda else torch.LongTensor(test_snap)
         test_triples_input_inv = torch.LongTensor(inverse_triples).cuda() if use_cuda else torch.LongTensor(inverse_triples)
-        test_triples, final_score = model.predict(que_pair, sub_snap, time_idx, history_glist, num_rels, static_graph, test_triples_input, use_cuda)
-        inv_test_triples, inv_final_score = model.predict(que_pair_inv, sub_snap_inv, time_idx, history_glist, num_rels, static_graph, test_triples_input_inv, use_cuda)
+        test_triples, final_score = model.predict(que_pair, tlist, sub_snap, time_idx, history_glist, num_rels, static_graph, test_triples_input, use_cuda)
+        inv_test_triples, inv_final_score = model.predict(que_pair_inv, tlist, sub_snap_inv, time_idx, history_glist, num_rels, static_graph, test_triples_input_inv, use_cuda)
+
+        # TODO  更新all_filter的计算机制 连接之后取softmax
 
         mrr_filter_snap, mrr_snap, rank_raw, rank_filter = utils.get_total_rank(test_triples, final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
         mrr_filter_snap_inv, mrr_snap_inv, rank_raw_inv, rank_filter_inv = utils.get_total_rank(inv_test_triples, inv_final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
@@ -316,6 +325,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
 
     if args.test and os.path.exists(model_state_file):
         mrr_raw, mrr_filter= test(model,
+                                args.train_history_len,
                                 train_list+valid_list, 
                                 test_list, 
                                 num_rels, 
@@ -346,9 +356,11 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 output = train_list[train_sample_num:train_sample_num+1]
                 if train_sample_num - args.train_history_len < 0:
                     input_list = train_list[0: train_sample_num]
+                    tlist = torch.Tensor(list(range(len(input_list)))).cuda()
                 else:
                     input_list = train_list[train_sample_num - args.train_history_len:
                                        train_sample_num]
+                    tlist = torch.Tensor(list(range(train_sample_num - args.train_history_len, train_sample_num))).cuda()
 
                 subgraph_arr = np.load('../data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
                 subgraph_arr_inv = np.load('../data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
@@ -364,10 +376,10 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 triples = torch.from_numpy(output[0]).long().cuda()
                 inverse_triples = torch.from_numpy(inverse_triples).long().cuda()
                 for id in range(2):
-                    if id %2 ==0:
-                        loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, use_cuda)
+                    if id % 2 ==0:
+                        loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, tlist, use_cuda)
                     else:
-                        loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, use_cuda)
+                        loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, tlist, use_cuda)
 
                     loss = loss_e+ loss_static +loss_cl
 
@@ -385,7 +397,8 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
 
             # validation
             if epoch and epoch % args.evaluate_every == 0:
-                mrr_raw, mrr_filter = test(model, 
+                mrr_raw, mrr_filter = test(model,
+                                    args.train_history_len,
                                     train_list, 
                                     valid_list, 
                                     num_rels, 
@@ -409,7 +422,8 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                         best_mrr = mrr_filter
                         torch.save({'state_dict': model.state_dict(), 'epoch': epoch}, model_state_file)
             torch.cuda.empty_cache()
-        mrr_raw, mrr_filter = test(model, 
+        mrr_raw, mrr_filter = test(model,
+                            args.train_history_len,
                             train_list+valid_list,
                             test_list, 
                             num_rels, 
@@ -552,6 +566,7 @@ if __name__ == '__main__':
     args.add_static_graph = True  # 是否使用静态图信息
     args.temperature = 0.03  # 对比学习的温度
     args.batch_size = 32  # 批量大小
+    args.use_cl = True  # 是否使用对比学习
 
     print(args)
     args.__dict__["test_history_len"] = args.__dict__["train_history_len"]

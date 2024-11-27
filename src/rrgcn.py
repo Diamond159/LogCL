@@ -247,7 +247,21 @@ class RecurrentRGCN(nn.Module):
         else:
             raise NotImplementedError
 
-    def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph, use_cuda):
+        self.alpha = 0.5
+        self.pi = 3.14159265358979323846
+        self.alpha_t = torch.nn.Parameter(torch.Tensor(num_ents, self.h_dim), requires_grad=True).float()
+        self.beta_t = torch.nn.Parameter(torch.Tensor(num_ents, self.h_dim), requires_grad=True).float()
+        self.temporal_w = torch.nn.Parameter(torch.Tensor(self.h_dim * 2, self.h_dim), requires_grad=True).float()
+        torch.nn.init.normal_(self.alpha_t)
+        torch.nn.init.normal_(self.beta_t)
+        torch.nn.init.normal_(self.temporal_w)
+    def get_dynamic_emb(self,static_emb,t):
+        # return self.static_emb
+        timevec = self.alpha * self.alpha_t*t + (1-self.alpha) * torch.cos(2 * self.pi * self.beta_t*t)
+        attn = torch.cat([static_emb,timevec],1)
+        return torch.mm(attn, self.temporal_w)
+
+    def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph ,t , use_cuda):
 
         if self.use_static:
             static_graph = static_graph.to(self.gpu)
@@ -259,6 +273,9 @@ class RecurrentRGCN(nn.Module):
         else:
             self.h = F.normalize(self.dynamic_emb) if self.layer_norm else self.dynamic_emb[:, :]
             static_emb = None
+
+        input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
+        self.h = input[-1]
 
         #-----------------全局历史建模-------------------------------------
         self.his_ent, subg_index = self.all_GCN(self.h, sub_graph,use_cuda)     # 全局历史实体嵌入his_ent
@@ -319,7 +336,7 @@ class RecurrentRGCN(nn.Module):
         return history_emb, static_emb, self.hr, his_emb, his_r_emb,his_temp_embs,his_rel_embs
 
 
-    def predict(self,que_pair, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets, use_cuda):
+    def predict(self,que_pair, tlist, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets, use_cuda):
         with torch.no_grad():
             all_triples = test_triplets
             
@@ -340,7 +357,7 @@ class RecurrentRGCN(nn.Module):
             query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
             query_mask[uniq_e] = query_emb
 
-            embedding, _, r_emb, his_emb, his_r_emb,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, use_cuda)
+            embedding, _, r_emb, his_emb, his_r_emb,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, tlist[0], use_cuda)
 
             if self.pre_type == "all":
 
@@ -351,7 +368,7 @@ class RecurrentRGCN(nn.Module):
             return all_triples, scores_en
 
 
-    def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, use_cuda):
+    def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, tlist, use_cuda):
         """
         :param glist:
         :param triplets:
@@ -388,7 +405,7 @@ class RecurrentRGCN(nn.Module):
         query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1)) 
         query_mask[uniq_e] = query_emb
 
-        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, use_cuda)
+        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0], use_cuda)
 
 
 
