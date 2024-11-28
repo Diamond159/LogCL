@@ -141,6 +141,7 @@ class RecurrentRGCN(nn.Module):
         self.aggregation = aggregation
         self.relation_evolve = False
         self.weight = weight
+        self.static_alpha = 1e-5
         self.pre_weight = pre_weight
         self.discount = discount
         self.use_static = use_static
@@ -268,14 +269,13 @@ class RecurrentRGCN(nn.Module):
             static_graph.ndata['h'] = torch.cat((self.dynamic_emb, self.words_emb), dim=0)  # 演化得到的表示，和wordemb满足静态图约束
             self.statci_rgcn_layer(static_graph, [])
             static_emb = static_graph.ndata.pop('h')[:self.num_ents, :]
-            static_emb = F.normalize(self.get_dynamic_emb(static_emb, t))
-            # static_emb = F.normalize(static_emb) if self.layer_norm else static_emb
+            static_emb = F.normalize(static_emb) if self.layer_norm else static_emb
             self.h = static_emb
         else:
             self.h = F.normalize(self.dynamic_emb) if self.layer_norm else self.dynamic_emb[:, :]
             static_emb = None
 
-        # input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
+        input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
         # self.h = input[-1]
 
         #-----------------全局历史建模-------------------------------------
@@ -306,7 +306,7 @@ class RecurrentRGCN(nn.Module):
                 current_h = F.normalize(current_h) if self.layer_norm else current_h
                 # current_h1 = F.sigmoid(self.w6(current_h))   # 让相应的维度大小早）0~1之间，通过mask矩阵获取query time 出现的实体，其他实体设置为0
                 att_e = F.softmax(self.w2(query_mask+current_h),dim=1)
-                
+
                 if i == 0:
                     self.h_0 = self.entity_cell(current_h, self.h)    # 第1层输入
                     self.h_0 = F.normalize(self.h_0) if self.layer_norm else self.h_0
@@ -324,7 +324,7 @@ class RecurrentRGCN(nn.Module):
                 his_rel_embs.append(self.hr)
                 his_temp_embs.append(self.h_0)
                 self.h = self.h_0
-                att_emb = att_e*self.h_0 
+                att_emb = att_e*self.h_0
                 att_embs.append(att_emb.unsqueeze(0))
             att_ent = torch.mean(torch.concat(att_embs,dim=0),dim=0)
             att_ent = F.normalize(att_ent)
@@ -334,13 +334,13 @@ class RecurrentRGCN(nn.Module):
             self.hr = None
             history_emb = None
 
-        return history_emb, static_emb, self.hr, his_emb, his_r_emb,his_temp_embs,his_rel_embs
+        return history_emb, static_emb, self.hr, his_emb, his_r_emb,his_temp_embs,his_rel_embs,history_embs
 
 
     def predict(self,que_pair, tlist, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets, use_cuda):
         with torch.no_grad():
             all_triples = test_triplets
-            
+
             #-----------------查询数据处理-------------------------------------
             uniq_e = que_pair[0]
             r_len = que_pair[1]
@@ -358,7 +358,7 @@ class RecurrentRGCN(nn.Module):
             query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
             query_mask[uniq_e] = query_emb
 
-            embedding, _, r_emb, his_emb, his_r_emb,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, tlist[0], use_cuda)
+            embedding, _, r_emb, his_emb, his_r_emb,_,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, tlist[0], use_cuda)
 
             if self.pre_type == "all":
 
@@ -373,7 +373,7 @@ class RecurrentRGCN(nn.Module):
         """
         :param glist:
         :param triplets:
-        :param static_graph: 
+        :param static_graph:
         :param use_cuda:
         :return:
         """
@@ -381,7 +381,7 @@ class RecurrentRGCN(nn.Module):
         loss_cl = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_rel = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_static = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
-        
+
         all_triples = triples
 
         ### --------------查询数据处理-----------------------
@@ -399,29 +399,31 @@ class RecurrentRGCN(nn.Module):
         t1 = torch.tensor(T_idx).cuda().to(self.gpu)
         q_t = torch.cos(self.weight_t2 * 0 + self.bias_t2).repeat(self.num_ents,1)
         qe_emb = self.w4(torch.concat([self.dynamic_emb,q_t],dim=1))
-        
+
         e1_emb = qe_emb[uniq_e]
 
-        rel_emb = e_input[uniq_e] 
-        query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1)) 
+        rel_emb = e_input[uniq_e]
+        query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
         query_mask[uniq_e] = query_emb
 
-        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0], use_cuda)
+        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs,history_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0], use_cuda)
 
 
 
         if self.pre_type == "all":
             scores_ob, _= self.decoder_ob.forward(embedding, r_emb, all_triples, his_emb,self.pre_weight, self.pre_type)
-            score_seq = F.softmax(scores_ob, dim=1)
-            score_en = score_seq
+            # score_seq = F.softmax(scores_ob, dim=1)
+            # score_en = score_seq
+            loss_ent += self.loss_e(scores_ob, triples[:, 2])
 
-        scores_en = torch.log(score_en)
-        loss_ent += F.nll_loss(scores_en, triples[:, 2])
+
+        # scores_en = torch.log(score_en)
+
 
         if self.relation_prediction:
             score_rel = self.rdecoder.forward(embedding,r_emb, all_triples, mode="train").view(-1, 2 * self.num_rels)
             loss_rel += self.loss_r(score_rel, all_triples[:, 1])
-        
+
         if self.use_cl and self.pre_type=="all":
             for id, evolve_emb in enumerate(his_temp_embs):
                 t3 = len(his_temp_embs)-id+1
@@ -429,7 +431,21 @@ class RecurrentRGCN(nn.Module):
                 query2 = torch.concat([evolve_emb[all_triples[:, 0]], his_rel_embs[id][all_triples[:, 1]]],dim=1)
                 x1 = self.w_cl(query)
                 x2 = self.w_cl(query2)
-                loss_cl += self.get_loss_conv(x1, x2) 
+                loss_cl += self.get_loss_conv(x1, x2)
+
+
+        for time_step, evolve_emb in enumerate(history_embs):
+            angle = 90 // len(history_embs)
+            # step = (self.angle * math.pi / 180) * (time_step + 1)
+            step = (self.angle * math.pi / 180) * (time_step + 1)
+            if self.layer_norm:
+                sim_matrix = torch.sum(static_emb * F.normalize(evolve_emb), dim=1)
+            else:
+                sim_matrix = torch.sum(static_emb * evolve_emb, dim=1)
+                c = torch.norm(static_emb, p=2, dim=1) * torch.norm(evolve_emb, p=2, dim=1)
+                sim_matrix = sim_matrix / c
+            mask = (math.cos(step) - sim_matrix) > 0
+            loss_static += self.static_alpha*self.weight * torch.sum(torch.masked_select(math.cos(step) - sim_matrix, mask))
 
         return loss_ent, loss_rel, loss_static, loss_cl
 
