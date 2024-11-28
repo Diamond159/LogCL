@@ -268,14 +268,15 @@ class RecurrentRGCN(nn.Module):
             static_graph.ndata['h'] = torch.cat((self.dynamic_emb, self.words_emb), dim=0)  # 演化得到的表示，和wordemb满足静态图约束
             self.statci_rgcn_layer(static_graph, [])
             static_emb = static_graph.ndata.pop('h')[:self.num_ents, :]
-            static_emb = F.normalize(static_emb) if self.layer_norm else static_emb
+            static_emb = F.normalize(self.get_dynamic_emb(static_emb, t))
+            # static_emb = F.normalize(static_emb) if self.layer_norm else static_emb
             self.h = static_emb
         else:
             self.h = F.normalize(self.dynamic_emb) if self.layer_norm else self.dynamic_emb[:, :]
             static_emb = None
 
-        input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
-        self.h = input[-1]
+        # input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
+        # self.h = input[-1]
 
         #-----------------全局历史建模-------------------------------------
         self.his_ent, subg_index = self.all_GCN(self.h, sub_graph,use_cuda)     # 全局历史实体嵌入his_ent

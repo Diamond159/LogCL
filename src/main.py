@@ -151,7 +151,7 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
     
     for time_idx, test_snap in enumerate(tqdm(test_list)):
         tc = start_time + time_idx
-        tlist = list(range(tc - history_len, tc))
+        tlist = list(range(tc - 3, tc))
         # tlist = [min(start_time-args.start_history_len-1,t) for t in tlist]
         tlist = torch.Tensor(tlist).cuda()
 
@@ -360,7 +360,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 else:
                     input_list = train_list[train_sample_num - args.train_history_len:
                                        train_sample_num]
-                    tlist = torch.Tensor(list(range(train_sample_num - args.train_history_len, train_sample_num))).cuda()
+                    tlist = torch.Tensor(list(range(train_sample_num - 3, train_sample_num))).cuda()
 
                 subgraph_arr = np.load('../data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
                 subgraph_arr_inv = np.load('../data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
@@ -546,7 +546,7 @@ if __name__ == '__main__':
     # 定义参数变量
     args.dataset = "ICEWS14"  # 数据集名称
     args.train_history_len = 7  # 训练历史长度
-    args.test_history_len = 7  # 测试历史长度
+    args.test_history_len = 7 # 测试历史长度
     args.dilate_len = 1  # 扩张历史图长度
     args.lr = 0.001  # 学习率
     args.n_layers = 2  # 传播层数
