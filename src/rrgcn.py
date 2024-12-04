@@ -256,17 +256,21 @@ class RecurrentRGCN(nn.Module):
         torch.nn.init.normal_(self.alpha_t)
         torch.nn.init.normal_(self.beta_t)
         torch.nn.init.normal_(self.temporal_w)
-    def get_dynamic_emb(self,static_emb,t):
+
+        self.st_static_emb = torch.nn.Parameter(torch.Tensor(num_ents, self.h_dim), requires_grad=True).float()
+        torch.nn.init.normal_(self.st_static_emb)
+    def get_dynamic_emb(self,t):
         # return self.static_emb
         timevec = self.alpha * self.alpha_t*t + (1-self.alpha) * torch.cos(2 * self.pi * self.beta_t*t)
-        attn = torch.cat([static_emb,timevec],1)
+        attn = torch.cat([self.st_static_emb,timevec],1)
         return torch.mm(attn, self.temporal_w)
 
     def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph ,t , use_cuda):
 
         if self.use_static:
             static_graph = static_graph.to(self.gpu)
-            static_graph.ndata['h'] = torch.cat((self.dynamic_emb, self.words_emb), dim=0)  # 演化得到的表示，和wordemb满足静态图约束
+            dynamic_emb = self.get_dynamic_emb(t)
+            static_graph.ndata['h'] = torch.cat((dynamic_emb, self.words_emb), dim=0)  # 演化得到的表示，和wordemb满足静态图约束
             self.statci_rgcn_layer(static_graph, [])
             static_emb = static_graph.ndata.pop('h')[:self.num_ents, :]
             static_emb = F.normalize(static_emb) if self.layer_norm else static_emb
@@ -275,7 +279,7 @@ class RecurrentRGCN(nn.Module):
             self.h = F.normalize(self.dynamic_emb) if self.layer_norm else self.dynamic_emb[:, :]
             static_emb = None
 
-        input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
+        # input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
         # self.h = input[-1]
 
         #-----------------全局历史建模-------------------------------------

@@ -4,9 +4,9 @@ The code of LogCL
 ### Process data
 First, unpack the data files 
 
-For the three ICEWS datasets 'ICEWS18', 'ICEWS14', 'ICEWS05-15', 'GDELT', go into the dataset folder in the `../data` directory and run the following command to construct the static graph and the query historical subgraph.
+For the three ICEWS datasets 'ICEWS18', 'ICEWS14', 'ICEWS05-15', 'GDELT', go into the dataset folder in the `./data` directory and run the following command to construct the static graph and the query historical subgraph.
 ```
-cd ../data/
+cd ./data/
 python get_his_subg.py
 cd ./<dataset>
 python ent2word.py

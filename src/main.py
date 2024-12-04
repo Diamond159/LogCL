@@ -151,7 +151,7 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
     
     for time_idx, test_snap in enumerate(tqdm(test_list)):
         tc = start_time + time_idx
-        tlist = list(range(tc - 3, tc))
+        tlist = list(range(tc - args.train_history_len, tc))
         # tlist = [min(start_time-args.start_history_len-1,t) for t in tlist]
         tlist = torch.Tensor(tlist).cuda()
 
@@ -360,7 +360,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 else:
                     input_list = train_list[train_sample_num - args.train_history_len:
                                        train_sample_num]
-                    tlist = torch.Tensor(list(range(train_sample_num - 3, train_sample_num))).cuda()
+                    tlist = torch.Tensor(list(range(train_sample_num - args.train_history_len, train_sample_num))).cuda()
 
                 subgraph_arr = np.load('../data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
                 subgraph_arr_inv = np.load('../data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
@@ -509,7 +509,7 @@ if __name__ == '__main__':
                         help="do relation prediction")
 
     # configuration for stat training
-    parser.add_argument("--n-epochs", type=int, default=500,
+    parser.add_argument("--n-epochs", type=int, default=25,
                         help="number of minimum training epochs on each time step")
     parser.add_argument("--lr", type=float, default=0.001,
                         help="learning rate")
@@ -544,7 +544,7 @@ if __name__ == '__main__':
 
     # %%
     # 定义参数变量
-    args.dataset = "ICEWS14"  # 数据集名称
+    args.dataset = "GDELT"  # 数据集名称
     args.train_history_len = 7  # 训练历史长度
     args.test_history_len = 7 # 测试历史长度
     args.dilate_len = 1  # 扩张历史图长度
@@ -564,7 +564,7 @@ if __name__ == '__main__':
     args.pre_weight = 0.9  # 实体预测任务的权重
     args.pre_type = "all"  # 预训练类型
     args.add_static_graph = True  # 是否使用静态图信息
-    args.temperature = 0.03  # 对比学习的温度
+    args.temperature = 0.07  # 对比学习的温度
     args.batch_size = 32  # 批量大小
     args.use_cl = True  # 是否使用对比学习
 

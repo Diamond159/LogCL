@@ -136,8 +136,8 @@ def get_data_with_t(data, tim):
     triples = [[quad[0], quad[1], quad[2]] for quad in data if quad[3] == tim]
     return np.array(triples)
 
-dataset_list = ["ICEWS14", "ICEWS18","ICEWS05-15"]
-#dataset_list = ["ICEWS14"]
+# dataset_list = ["ICEWS14", "ICEWS18","ICEWS05-15"]
+dataset_list = ["GDELT"]
 for dataset in dataset_list:
     train_data, train_times = load_quadruples('./{}'.format(dataset), 'train.txt')
     num_nodes,num_rels= get_total_number('./{}'.format(dataset), 'stat.txt')
@@ -159,7 +159,7 @@ for dataset in dataset_list:
     mkdirs(save_dir_sub)
     mkdirs(save_dir_subg)
 
-    # f2 = open('../data/{}/copy_seq_graph/train_h_r_copy_seq.pkl'.format(args.dataset), 'rb')
+    # f2 = open('./data/{}/copy_seq_graph/train_h_r_copy_seq.pkl'.format(args.dataset), 'rb')
     # que_subg = pickle.load(f2)
     sr_to_sro = defaultdict(set)
     s_to_sro = defaultdict(set)
@@ -199,7 +199,7 @@ for dataset in dataset_list:
 #     his_arr = np.concatenate(sample_seq_graph)
 #     # que_subg = his_graph_sample1(his_arr, triple[0], num_r,que_subg_list, que_subg_len)
 #     que_subg = get_sample_from_history_graph3(his_arr, triple[0], num_rels,que_subg_list, que_subg_len)
-#     # with open('../data/{}/copy_seq_graph/train_h_r_copy_seq_{}.pkl'.format(args.dataset, id), 'wb') as f:
+#     # with open('./data/{}/copy_seq_graph/train_h_r_copy_seq_{}.pkl'.format(args.dataset, id), 'wb') as f:
 #     #     pickle.dump(que_subg, f)
 # with open('./{}/copy_seq_graph/train_h_r_copy_seq.pkl'.format(dataset), 'wb') as f1:
 #     pickle.dump(que_subg, f1)
