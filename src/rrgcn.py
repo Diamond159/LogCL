@@ -9,6 +9,7 @@ from rgcn.layers import UnionRGCNLayer, RGCNBlockLayer, RGAT, UnionRGCNLayer2, U
 from src.model import BaseRGCN
 from src.decoder import ConvTransE, ConvTransR
 from collections import defaultdict
+from scipy.sparse import coo_matrix
 
 class MLPLinear(nn.Module):
     def __init__(self, in_dim, out_dim):
@@ -265,7 +266,61 @@ class RecurrentRGCN(nn.Module):
         attn = torch.cat([self.st_static_emb,timevec],1)
         return torch.mm(attn, self.temporal_w)
 
-    def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph ,t , use_cuda):
+    def sparse2th(self, mat, shape):
+        value = mat.data
+        indices = torch.LongTensor([mat.row, mat.col])
+        tensor = torch.sparse.FloatTensor(indices, torch.from_numpy(value).float(), shape)
+        return tensor
+
+    def change_edges(self, edges):
+        edges_list = []
+        node_id_dic = {}
+
+        i = 0
+        for line in edges:
+            head = line[1]
+            tail = line[0]
+            rel = line[2]
+
+            if head not in node_id_dic:
+                node_id_dic[head] = i
+                i = i + 1
+            if tail not in node_id_dic:
+                node_id_dic[tail] = i
+                i = i + 1
+            edges_list.append([node_id_dic[head], rel, node_id_dic[tail]])
+        edges_list = np.array(edges_list)
+        return edges_list
+
+    def cal_pmpd(self, edges, num_nodes):
+        use_edges = self.change_edges(edges)
+        src, rel, dst = use_edges.transpose()
+        coo_rows = []
+        coo_cols = []
+        coo_data = []
+
+        for index, data in enumerate(src):
+            coo_rows.append(data)
+            coo_cols.append(index)
+            coo_data.append(1)
+
+        for index, data in enumerate(dst):
+            coo_rows.append(data)
+            coo_cols.append(index)
+            coo_data.append(-1)
+
+        coo_rows = np.array(coo_rows)
+        coo_cols = np.array(coo_cols)
+        coo_data = np.array(coo_data)
+
+        data = coo_matrix((coo_data, (coo_rows, coo_cols)))
+
+        data = self.sparse2th(data, (num_nodes, len(edges)))
+
+        return data
+
+    def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph ,t ,input_list,num_nodes,history_super_glist, use_cuda):
+
 
         if self.use_static:
             static_graph = static_graph.to(self.gpu)
@@ -275,9 +330,10 @@ class RecurrentRGCN(nn.Module):
             static_emb = static_graph.ndata.pop('h')[:self.num_ents, :]
             static_emb = F.normalize(static_emb) if self.layer_norm else static_emb
             self.h = static_emb
-        else:
+        else: 
             self.h = F.normalize(self.dynamic_emb) if self.layer_norm else self.dynamic_emb[:, :]
             static_emb = None
+
 
         # input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
         # self.h = input[-1]
@@ -295,7 +351,19 @@ class RecurrentRGCN(nn.Module):
         his_rel_embs =[]
         if self.pre_type=="all":
             for i, g in enumerate(g_list):
+                # g_trilist = input_list[i]         TODO   参考DHper 修改current_h的嵌入   暂时不做修改
+                # inverse_test_triplets = g_trilist[:, [2, 1, 0]]
+                # inverse_test_triplets[:, 1] = inverse_test_triplets[:, 1] + self.num_rels  #
+                # all_triples = torch.cat((torch.from_numpy(g_trilist), torch.from_numpy(inverse_test_triplets)))
+                # pm_pd = self.cal_pmpd(all_triples, num_nodes)
+
                 g = g.to(self.gpu)
+
+                # super_g = history_super_glist[i] # 后续做二次前向传播
+                # super_g = super_g.to(self.gpu)
+                #
+                # lg = g.line_graph(backtracking=False)
+
                 t2 = len(g_list)-i+1
                 h_t = torch.cos(self.weight_t2 * t2 + self.bias_t2).repeat(self.num_ents,1)
                 self.h =self.w4(torch.concat([self.h,h_t],dim=1))
@@ -341,7 +409,7 @@ class RecurrentRGCN(nn.Module):
         return history_emb, static_emb, self.hr, his_emb, his_r_emb,his_temp_embs,his_rel_embs,history_embs
 
 
-    def predict(self,que_pair, tlist, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets, use_cuda):
+    def predict(self,que_pair, tlist, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets,input_list,num_nodes,history_super_glist, use_cuda):
         with torch.no_grad():
             all_triples = test_triplets
 
@@ -362,7 +430,7 @@ class RecurrentRGCN(nn.Module):
             query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
             query_mask[uniq_e] = query_emb
 
-            embedding, _, r_emb, his_emb, his_r_emb,_,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, tlist[0], use_cuda)
+            embedding, _, r_emb, his_emb, his_r_emb,_,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, tlist[0],input_list,num_nodes,history_super_glist, use_cuda)
 
             if self.pre_type == "all":
 
@@ -373,7 +441,7 @@ class RecurrentRGCN(nn.Module):
             return all_triples, scores_en
 
 
-    def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, tlist, use_cuda):
+    def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, tlist,input_list,num_nodes,history_super_glist, use_cuda):
         """
         :param glist:
         :param triplets:
@@ -384,7 +452,7 @@ class RecurrentRGCN(nn.Module):
         loss_ent = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_cl = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
         loss_rel = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
-        loss_static = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
+        loss_cp = torch.zeros(1).cuda().to(self.gpu) if use_cuda else torch.zeros(1)
 
         all_triples = triples
 
@@ -410,7 +478,7 @@ class RecurrentRGCN(nn.Module):
         query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
         query_mask[uniq_e] = query_emb
 
-        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs,history_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0], use_cuda)
+        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs,history_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0],input_list,num_nodes,history_super_glist, use_cuda)
 
 
 
@@ -449,9 +517,9 @@ class RecurrentRGCN(nn.Module):
                 c = torch.norm(static_emb, p=2, dim=1) * torch.norm(evolve_emb, p=2, dim=1)
                 sim_matrix = sim_matrix / c
             mask = (math.cos(step) - sim_matrix) > 0
-            loss_static += self.static_alpha*self.weight * torch.sum(torch.masked_select(math.cos(step) - sim_matrix, mask))
+            loss_cp += self.static_alpha*self.weight * torch.sum(torch.masked_select(math.cos(step) - sim_matrix, mask))
 
-        return loss_ent, loss_rel, loss_static, loss_cl
+        return loss_ent, loss_rel, loss_cp, loss_cl
 
     def all_GCN(self,ent_emb, sub_graph, use_cuda):
         sub_graph = sub_graph.to(self.gpu)

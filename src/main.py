@@ -13,7 +13,7 @@ from tqdm import tqdm
 import random
 sys.path.append(".")
 from rgcn import utils
-from rgcn.utils import build_sub_graph, build_graph
+from rgcn.utils import build_sub_graph, build_graph, get_relhead_reltal, build_super_g
 from src.rrgcn import RecurrentRGCN
 import torch.nn.modules.rnn
 from collections import defaultdict
@@ -162,11 +162,22 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
         que_pair_inv =  e2r(inverse_triples, num_rels)
 
         sub_snap,sub_snap_inv = get_sample_from_history_graph3(subg_arr, sr_to_sro, test_snap , num_nodes,num_rels,use_cuda, args.gpu)
+        # 聚合关系的RGCN，构造关系超图的DGL对象，同样组织为DGL对象的列表
+        history_super_glist = []
+        for sub_g in input_list:
+            rel_head, rel_tail = get_relhead_reltal(sub_g, num_nodes, num_rels)
+            super_sub_g = build_super_g(num_rels, rel_head, rel_tail, use_cuda, False, args.gpu)
+            history_super_glist.append(super_sub_g)
 
         test_triples_input = torch.LongTensor(test_snap).cuda() if use_cuda else torch.LongTensor(test_snap)
-        test_triples_input_inv = torch.LongTensor(inverse_triples).cuda() if use_cuda else torch.LongTensor(inverse_triples)
-        test_triples, final_score = model.predict(que_pair, tlist, sub_snap, time_idx, history_glist, num_rels, static_graph, test_triples_input, use_cuda)
-        inv_test_triples, inv_final_score = model.predict(que_pair_inv, tlist, sub_snap_inv, time_idx, history_glist, num_rels, static_graph, test_triples_input_inv, use_cuda)
+        test_triples_input_inv = torch.LongTensor(inverse_triples).cuda() if use_cuda else torch.LongTensor(
+            inverse_triples)
+        test_triples, final_score = model.predict(que_pair, tlist, sub_snap, time_idx, history_glist, num_rels,
+                                                  static_graph, test_triples_input, input_list, num_nodes,
+                                                  history_super_glist, use_cuda)
+        inv_test_triples, inv_final_score = model.predict(que_pair_inv, tlist, sub_snap_inv, time_idx, history_glist,
+                                                          num_rels, static_graph, test_triples_input_inv, input_list,
+                                                          num_nodes, history_super_glist, use_cuda)
 
         # TODO  更新all_filter的计算机制 连接之后取softmax
 
@@ -347,7 +358,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
             losses = []
             losses_e = []
             losses_r = []
-            losses_static = []
+            losses_cp = []
 
             idx = [_ for _ in range(len(train_list))]
 
@@ -361,6 +372,12 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     input_list = train_list[train_sample_num - args.train_history_len:
                                        train_sample_num]
                     tlist = torch.Tensor(list(range(train_sample_num - args.train_history_len, train_sample_num))).cuda()
+                # 聚合关系的RGCN，构造关系超图的DGL对象，同样组织为DGL对象的列表
+                history_super_glist = []
+                for sub_g in input_list:
+                    rel_head, rel_tail = get_relhead_reltal(sub_g, num_nodes, num_rels)
+                    super_sub_g = build_super_g(num_rels, rel_head, rel_tail, use_cuda, False, args.gpu)
+                    history_super_glist.append(super_sub_g)
 
                 subgraph_arr = np.load('../data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
                 subgraph_arr_inv = np.load('../data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
@@ -377,23 +394,23 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 inverse_triples = torch.from_numpy(inverse_triples).long().cuda()
                 for id in range(2):
                     if id % 2 ==0:
-                        loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, tlist, use_cuda)
+                        loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, tlist,input_list,num_nodes,history_super_glist, use_cuda)
                     else:
-                        loss_e, loss_r, loss_static, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, tlist, use_cuda)
+                        loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, tlist,input_list,num_nodes,history_super_glist, use_cuda)
 
-                    loss = loss_e+ loss_static +loss_cl
+                    loss = loss_e+ loss_cp +loss_cl
 
                     losses.append(loss.item())
                     losses_e.append(loss_e.item())
                     losses_r.append(loss_r.item())
-                    losses_static.append(loss_static.item())
+                    losses_cp.append(loss_cp.item())
                     loss.backward()
                     torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_norm)  # clip gradients
                     optimizer.step()
                     optimizer.zero_grad()
                 # break
             print("Epoch {:04d} | Ave Loss: {:.4f} | entity-relation-static:{:.4f}-{:.4f}-{:.4f} Best MRR {:.4f} | Model {} "
-                  .format(epoch, np.mean(losses), np.mean(losses_e), np.mean(losses_r), np.mean(losses_static), best_mrr, model_name))
+                  .format(epoch, np.mean(losses), np.mean(losses_e), np.mean(losses_r), np.mean(losses_cp), best_mrr, model_name))
 
             # validation
             if epoch and epoch % args.evaluate_every == 0:

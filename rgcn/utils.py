@@ -10,7 +10,7 @@ import dgl
 from tqdm import tqdm
 import rgcn.knowledge_graph as knwlgrh
 from collections import defaultdict
-
+from scipy import sparse
 
 #######################################################################
 #
@@ -481,3 +481,119 @@ def soft_max(z):
     t = np.exp(z)
     a = np.exp(z) / np.sum(t)
     return a
+def r2e_super(triplets, num_rels): # triplets(array): [[s, r, o], [s, r, o], ...]
+    src, rel, dst = triplets.transpose()
+    # get all relations
+    uniq_super_r = np.unique(rel) # 从小到大排列
+    # uniq_r = np.concatenate((uniq_r, uniq_r+num_rels)) # 在当前时间戳内出现的所有的边
+    # generate r2e
+    r_to_e = defaultdict(set) # 获得和每一条边相关的节点
+    for j, (src, rel, dst) in enumerate(triplets): # 对于时间戳内的每一个事实三元组
+        r_to_e[rel].add(src)
+        r_to_e[rel].add(dst)
+        # r_to_e[rel+num_rels].add(src)
+        # r_to_e[rel+num_rels].add(dst)
+    r_len = []
+    e_idx = []
+    idx = 0
+    for r in uniq_super_r: # 对于在该时间戳内出现的每一条超边
+        r_len.append((idx,idx+len(r_to_e[r]))) # 记录和边r相关的node的idx范围
+        e_idx.extend(list(r_to_e[r])) # 和边r相关的node列表
+        idx += len(r_to_e[r])
+    return uniq_super_r, r_len, e_idx
+
+def get_relhead_reltal(tris, num_nodes, num_rels):
+    '''
+    考虑加入反关系形成无向图
+    :param tris: 一个时间戳子图内的所有事实三元组array(/列表) [[s, p, o], ...]
+    :param num_nodes: 所有的实体数目
+    :param num_rels: 所有的关系数目
+    :return:
+    '''
+    inverse_triplets = tris[:, [2, 1, 0]]
+    inverse_triplets[:, 1] = inverse_triplets[:, 1] + num_rels # 将逆关系换成逆关系的id
+    all_tris = np.concatenate((tris, inverse_triplets), axis=0)
+
+    rel_head = torch.zeros((num_rels*2, num_nodes), dtype=torch.int) # 二维tensor
+    rel_tail = torch.zeros((num_rels*2, num_nodes), dtype=torch.int)
+
+    for tri in all_tris: # 对于support set中的每一个事实三元组
+        h, r, t = tri
+
+        rel_head[r, h] += 1 # support中相同h和r的事实数目统计
+        rel_tail[r, t] += 1 # support中相同r和t的事实数目统计
+
+    return rel_head, rel_tail
+
+def build_super_g(num_rels, rel_head, rel_tail, use_cuda, segnn, gpu):
+    '''
+    :param num_rels: 所有边（不包含反向边）
+    :param rel_head: 一个时间戳子图中相同h和r的事实数目统计, (num_rels*2, num_ent) 与特定关系（边）相连的头实体（数目）统计
+    :param rel_tail: 一个时间戳子图中相同r和t的事实数目统计, (num_rels*2, num_ent) 与特定关系（边）相连的尾实体（数目）统计
+    :param use_cuda: 是否使用GPU
+    :param segnn: 是否使用segnn
+    :param gpu: GPU的设备号
+    :return:
+    '''
+    def comp_deg_norm(g):
+        in_deg = g.in_degrees(range(g.number_of_nodes())).float() # 图中每一个节点的入度
+        in_deg[torch.nonzero(in_deg == 0).view(-1)] = 1 # 入度为0的赋值为1
+        norm = 1.0 / in_deg # 归一化操作 1/入度
+        return norm
+
+    # 关系邻接矩阵（对应不同的方向（位置）模式）
+    tail_head = torch.matmul(rel_tail, rel_head.T) # (num_rels*2, num_rels*2) 如果rel1的尾实体是rel2的头实体，那么矩阵相乘的结果(rel1, rel2)对应的值非0
+    head_tail = torch.matmul(rel_head, rel_tail.T) # (num_rels*2, num_rels*2) 如果rel1的头实体是rel2的尾实体，那么矩阵相乘的结果(rel1, rel2)对应的值非0
+    # torch.diag: 变换生成对角矩阵 torch.diag(torch.sum(rel_tail, axis=1): 与rel相连的尾实体个数
+    # 如果rel1的尾实体是rel2的尾实体，那么矩阵相乘的结果(rel1, rel2)对应的值非0
+    # 减法运算使对角线元素为0（除去关系自身(rel, rel)的情况），但是如果相同的关系对应多个尾实体（多对一关系），那么仍然会有记录
+    tail_tail = torch.matmul(rel_tail, rel_tail.T) - torch.diag(torch.sum(rel_tail, axis=1)) # (num_rels*2, num_rels*2)
+    # 如果rel1的头实体是rel2的头实体，那么矩阵相乘的结果(rel1, rel2)对应的值非0
+    # 减法运算使对角线元素为0（除去关系自身(rel, rel)的情况），但是如果相同的关系对应多个头实体（一对多关系），那么仍然会有记录
+    # 以上操作也就是对一对多关系和多对一关系加上自环
+    head_head = torch.matmul(rel_head, rel_head.T) - torch.diag(torch.sum(rel_head, axis=1)) # (num_rels*2, num_rels*2)
+
+    # construct super relation graph from adjacency matrix
+    src = torch.LongTensor([])
+    dst = torch.LongTensor([])
+    p_rel = torch.LongTensor([])
+    for p_rel_idx, mat in enumerate([tail_head, head_tail, tail_tail, head_head]): # p_rel_idx: 0, 1, 2, 3
+        sp_mat = sparse.coo_matrix(mat) # mat: 每一种类型的关系矩阵
+        src = torch.cat([src, torch.from_numpy(sp_mat.row)]) # 行索引数组 对应num_rels邻接矩阵的行关系坐标
+        dst = torch.cat([dst, torch.from_numpy(sp_mat.col)]) # 列索引数组 对应num_rels邻接矩阵的列关系坐标
+        p_rel = torch.cat([p_rel, torch.LongTensor([p_rel_idx] * len(sp_mat.data))]) # 4类超关系的数目，4类超关系重复多少次
+
+    # 生成super_relation_g的时序子图下的所有事实三元组
+    src_tris = src.unsqueeze(1)
+    dst_tris = src.unsqueeze(1)
+    p_rel_tris = p_rel.unsqueeze(1)
+    super_triples = torch.cat((src_tris, p_rel_tris, dst_tris), dim=1).numpy()
+    src = src.numpy()
+    dst = dst.numpy()
+    p_rel = p_rel.numpy()
+    src, dst = np.concatenate((src, dst)), np.concatenate((dst, src))
+    p_rel = np.concatenate((p_rel, p_rel + 4))
+
+    # 构造super_relation_g的DGL对象
+    if segnn:
+        super_g = dgl.graph((src, dst), num_nodes=num_rels*2)
+        super_g.edata['rel_id'] = torch.LongTensor(p_rel)
+    else:
+        super_g = dgl.DGLGraph()
+        super_g.add_nodes(num_rels*2) # 加入所有边节点
+        super_g.add_edges(src, dst) # 加入所有位置超关系
+        norm = comp_deg_norm(super_g) # 对一个子图中的所有节点进行归一化
+        rel_node_id = torch.arange(0, num_rels*2, dtype=torch.long).view(-1, 1) # [0, num_rels*2)
+        super_g.ndata.update({'id': rel_node_id, 'norm': norm.view(-1, 1)}) # shape都为(num_rels*2, 1)
+        super_g.apply_edges(lambda edges: {'norm': edges.dst['norm'] * edges.src['norm']}) # 更新边, 边的归一化系数为头尾节点的归一化系数相乘
+        super_g.edata['type'] = torch.LongTensor(p_rel) # 边的类型数据
+
+    uniq_super_r, r_len, r_to_e = r2e_super(super_triples, num_rels)  # uniq_r: 在当前时间戳内出现的所有的边(包括反向边)；r_len: 记录和边r相关的node的idx范围; e_idx: 和边r相关的node列表
+    super_g.uniq_super_r = uniq_super_r  # 在当前时间戳内出现的所有的边(包括反向边)
+    super_g.r_to_e = r_to_e  # 和边r相关的node列表，按照uniq_r中记录边的顺序排列
+    super_g.r_len = r_len
+
+    if use_cuda:
+        super_g.to(gpu)
+        super_g.r_to_e = torch.from_numpy(np.array(r_to_e))
+    return super_g # 通过关系邻接矩阵构建关系超图DGL对象: [[rel1, meta-rel, rel2], ...]
