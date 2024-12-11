@@ -52,7 +52,7 @@ class RGCNCell(BaseRGCN):
             raise NotImplementedError
 
 
-    def forward(self, g, init_ent_emb, init_rel_emb):
+    def forward(self, g, init_ent_emb, init_rel_emb, lg):
         if self.encoder_name == "uvrgcn" or self.encoder_name == "kbat" or self.encoder_name == "compgcn":
             node_id = g.ndata['id'].squeeze()
             g.ndata['h'] = init_ent_emb[node_id]
@@ -319,9 +319,7 @@ class RecurrentRGCN(nn.Module):
 
         return data
 
-    def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph ,t ,input_list,num_nodes,history_super_glist, use_cuda):
-
-
+    def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph ,t ,input_list,num_nodes, use_cuda):
         if self.use_static:
             static_graph = static_graph.to(self.gpu)
             dynamic_emb = self.get_dynamic_emb(t)
@@ -351,7 +349,7 @@ class RecurrentRGCN(nn.Module):
         his_rel_embs =[]
         if self.pre_type=="all":
             for i, g in enumerate(g_list):
-                # g_trilist = input_list[i]         TODO   参考DHper 修改current_h的嵌入   暂时不做修改
+                # g_trilist = input_list[i]         # TODO   参考DHper
                 # inverse_test_triplets = g_trilist[:, [2, 1, 0]]
                 # inverse_test_triplets[:, 1] = inverse_test_triplets[:, 1] + self.num_rels  #
                 # all_triples = torch.cat((torch.from_numpy(g_trilist), torch.from_numpy(inverse_test_triplets)))
@@ -359,10 +357,7 @@ class RecurrentRGCN(nn.Module):
 
                 g = g.to(self.gpu)
 
-                # super_g = history_super_glist[i] # 后续做二次前向传播
-                # super_g = super_g.to(self.gpu)
-                #
-                # lg = g.line_graph(backtracking=False)
+                lg = g.line_graph(backtracking=False)
 
                 t2 = len(g_list)-i+1
                 h_t = torch.cos(self.weight_t2 * t2 + self.bias_t2).repeat(self.num_ents,1)
@@ -374,7 +369,7 @@ class RecurrentRGCN(nn.Module):
                     x_mean = torch.mean(x, dim=0, keepdim=True)
                     x_input[r_idx] = x_mean
                 x_input = self.emb_rel + x_input
-                current_h = self.rgcn.forward(g, self.h, [self.emb_rel, self.emb_rel])
+                current_h = self.rgcn.forward(g, self.h, [self.emb_rel, self.emb_rel], lg)
                 current_h = F.normalize(current_h) if self.layer_norm else current_h
                 # current_h1 = F.sigmoid(self.w6(current_h))   # 让相应的维度大小早）0~1之间，通过mask矩阵获取query time 出现的实体，其他实体设置为0
                 att_e = F.softmax(self.w2(query_mask+current_h),dim=1)
@@ -409,7 +404,7 @@ class RecurrentRGCN(nn.Module):
         return history_emb, static_emb, self.hr, his_emb, his_r_emb,his_temp_embs,his_rel_embs,history_embs
 
 
-    def predict(self,que_pair, tlist, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets,input_list,num_nodes,history_super_glist, use_cuda):
+    def predict(self,que_pair, tlist, sub_graph,T_id, test_graph, num_rels, static_graph, test_triplets,input_list,num_nodes, use_cuda):
         with torch.no_grad():
             all_triples = test_triplets
 
@@ -430,7 +425,7 @@ class RecurrentRGCN(nn.Module):
             query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
             query_mask[uniq_e] = query_emb
 
-            embedding, _, r_emb, his_emb, his_r_emb,_,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, tlist[0],input_list,num_nodes,history_super_glist, use_cuda)
+            embedding, _, r_emb, his_emb, his_r_emb,_,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, tlist[0],input_list,num_nodes, use_cuda)
 
             if self.pre_type == "all":
 
@@ -441,7 +436,7 @@ class RecurrentRGCN(nn.Module):
             return all_triples, scores_en
 
 
-    def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, tlist,input_list,num_nodes,history_super_glist, use_cuda):
+    def get_loss(self,que_pair, sub_graph,T_idx, glist, triples, static_graph, tlist,input_list,num_nodes, use_cuda):
         """
         :param glist:
         :param triplets:
@@ -478,7 +473,7 @@ class RecurrentRGCN(nn.Module):
         query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
         query_mask[uniq_e] = query_emb
 
-        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs,history_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0],input_list,num_nodes,history_super_glist, use_cuda)
+        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs,history_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0],input_list,num_nodes, use_cuda)
 
 
 

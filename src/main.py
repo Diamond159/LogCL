@@ -162,22 +162,16 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
         que_pair_inv =  e2r(inverse_triples, num_rels)
 
         sub_snap,sub_snap_inv = get_sample_from_history_graph3(subg_arr, sr_to_sro, test_snap , num_nodes,num_rels,use_cuda, args.gpu)
-        # 聚合关系的RGCN，构造关系超图的DGL对象，同样组织为DGL对象的列表
-        history_super_glist = []
-        for sub_g in input_list:
-            rel_head, rel_tail = get_relhead_reltal(sub_g, num_nodes, num_rels)
-            super_sub_g = build_super_g(num_rels, rel_head, rel_tail, use_cuda, False, args.gpu)
-            history_super_glist.append(super_sub_g)
+
 
         test_triples_input = torch.LongTensor(test_snap).cuda() if use_cuda else torch.LongTensor(test_snap)
         test_triples_input_inv = torch.LongTensor(inverse_triples).cuda() if use_cuda else torch.LongTensor(
             inverse_triples)
         test_triples, final_score = model.predict(que_pair, tlist, sub_snap, time_idx, history_glist, num_rels,
-                                                  static_graph, test_triples_input, input_list, num_nodes,
-                                                  history_super_glist, use_cuda)
+                                                  static_graph, test_triples_input, input_list, num_nodes, use_cuda)
         inv_test_triples, inv_final_score = model.predict(que_pair_inv, tlist, sub_snap_inv, time_idx, history_glist,
                                                           num_rels, static_graph, test_triples_input_inv, input_list,
-                                                          num_nodes, history_super_glist, use_cuda)
+                                                          num_nodes, use_cuda)
 
         # TODO  更新all_filter的计算机制 连接之后取softmax
 
@@ -394,9 +388,9 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 inverse_triples = torch.from_numpy(inverse_triples).long().cuda()
                 for id in range(2):
                     if id % 2 ==0:
-                        loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, tlist,input_list,num_nodes,history_super_glist, use_cuda)
+                        loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, tlist,input_list,num_nodes, use_cuda)
                     else:
-                        loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, tlist,input_list,num_nodes,history_super_glist, use_cuda)
+                        loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, tlist,input_list,num_nodes, use_cuda)
 
                     loss = loss_e+ loss_cp +loss_cl
 
@@ -561,9 +555,9 @@ if __name__ == '__main__':
 
     # %%
     # 定义参数变量
-    args.dataset = "GDELT"  # 数据集名称
+    args.dataset = "ICEWS14"  # 数据集名称
     args.train_history_len = 7  # 训练历史长度
-    args.test_history_len = 7 # 测试历史长度
+    args.test_history_len = 7  # 测试历史长度
     args.dilate_len = 1  # 扩张历史图长度
     args.lr = 0.001  # 学习率
     args.n_layers = 2  # 传播层数
@@ -581,7 +575,7 @@ if __name__ == '__main__':
     args.pre_weight = 0.9  # 实体预测任务的权重
     args.pre_type = "all"  # 预训练类型
     args.add_static_graph = True  # 是否使用静态图信息
-    args.temperature = 0.07  # 对比学习的温度
+    args.temperature = 0.03  # 对比学习的温度
     args.batch_size = 32  # 批量大小
     args.use_cl = True  # 是否使用对比学习
 
