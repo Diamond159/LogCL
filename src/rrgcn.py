@@ -52,13 +52,13 @@ class RGCNCell(BaseRGCN):
             raise NotImplementedError
 
 
-    def forward(self, g, init_ent_emb, init_rel_emb, lg):
+    def forward(self, g, init_ent_emb, init_rel_emb, pm_pd, lg):
         if self.encoder_name == "uvrgcn" or self.encoder_name == "kbat" or self.encoder_name == "compgcn":
             node_id = g.ndata['id'].squeeze()
             g.ndata['h'] = init_ent_emb[node_id]
             x, r = init_ent_emb, init_rel_emb
             for i, layer in enumerate(self.layers):
-                layer(g, [], r[i])
+                layer(g, pm_pd, r[i])
             return g.ndata.pop('h')
         else:
             if self.features is not None:
@@ -93,13 +93,13 @@ class RGCNCell2(BaseRGCN):
             raise NotImplementedError
 
 
-    def forward(self, g, init_ent_emb, init_rel_emb):
+    def forward(self, g, init_ent_emb, init_rel_emb, pm_pd, lg):
         if self.encoder_name == "uvrgcn":
             node_id = g.ndata['id'].squeeze()
             g.ndata['h'] = init_ent_emb[node_id]
             x, r = init_ent_emb, init_rel_emb
             for i, layer in enumerate(self.layers):
-                layer(g, [], r[i])
+                layer(g, pm_pd, r[i])
             return g.ndata.pop('h')
         else:
             if self.features is not None:
@@ -322,8 +322,11 @@ class RecurrentRGCN(nn.Module):
     def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph ,t ,input_list,num_nodes, use_cuda):
         if self.use_static:
             static_graph = static_graph.to(self.gpu)
-            dynamic_emb = self.get_dynamic_emb(t)
-            static_graph.ndata['h'] = torch.cat((dynamic_emb, self.words_emb), dim=0)  # 演化得到的表示，和wordemb满足静态图约束
+            if self.use_cl:
+                dynamic_emb = self.get_dynamic_emb(t)
+                static_graph.ndata['h'] = torch.cat((dynamic_emb, self.words_emb), dim=0)  # 演化得到的表示，和wordemb满足静态图约束
+            else:
+                static_graph.ndata['h'] = torch.cat((self.dynamic_emb, self.words_emb), dim=0)
             self.statci_rgcn_layer(static_graph, [])
             static_emb = static_graph.ndata.pop('h')[:self.num_ents, :]
             static_emb = F.normalize(static_emb) if self.layer_norm else static_emb
@@ -336,12 +339,12 @@ class RecurrentRGCN(nn.Module):
         # input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
         # self.h = input[-1]
 
-        #-----------------全局历史建模-------------------------------------
-        self.his_ent, subg_index = self.all_GCN(self.h, sub_graph,use_cuda)     # 全局历史实体嵌入his_ent
-        his_r_emb = F.normalize(self.emb_rel)  # 全局历史关系嵌入his_r_emb
-        his_att = F.softmax(self.w5(query_mask+ self.his_ent),dim=1)
-        his_emb = his_att*self.his_ent
-        his_emb = F.normalize(his_emb)
+        # #-----------------全局历史建模-------------------------------------
+        # self.his_ent, subg_index = self.all_GCN(self.h, sub_graph,use_cuda)     # 全局历史实体嵌入his_ent
+        # his_r_emb = F.normalize(self.emb_rel)  # 全局历史关系嵌入his_r_emb
+        # his_att = F.softmax(self.w5(query_mask+ self.his_ent),dim=1)
+        # his_emb = his_att*self.his_ent
+        # his_emb = F.normalize(his_emb)
 
         history_embs = []
         att_embs = []
@@ -349,15 +352,23 @@ class RecurrentRGCN(nn.Module):
         his_rel_embs =[]
         if self.pre_type=="all":
             for i, g in enumerate(g_list):
-                # g_trilist = input_list[i]         # TODO   参考DHper
-                # inverse_test_triplets = g_trilist[:, [2, 1, 0]]
-                # inverse_test_triplets[:, 1] = inverse_test_triplets[:, 1] + self.num_rels  #
-                # all_triples = torch.cat((torch.from_numpy(g_trilist), torch.from_numpy(inverse_test_triplets)))
-                # pm_pd = self.cal_pmpd(all_triples, num_nodes)
+                g_trilist = input_list[i]
+                inverse_test_triplets = g_trilist[:, [2, 1, 0]]
+                inverse_test_triplets[:, 1] = inverse_test_triplets[:, 1] + self.num_rels  #
+                all_triples = torch.cat((torch.from_numpy(g_trilist), torch.from_numpy(inverse_test_triplets)))
+                pm_pd = self.cal_pmpd(all_triples, num_nodes)
 
                 g = g.to(self.gpu)
 
                 lg = g.line_graph(backtracking=False)
+
+                if i == 0:
+                    # -----------------全局历史建模-------------------------------------
+                    self.his_ent, subg_index = self.all_GCN(self.h, sub_graph, use_cuda, pm_pd, lg)  # 全局历史实体嵌入his_ent
+                    his_r_emb = F.normalize(self.emb_rel)  # 全局历史关系嵌入his_r_emb
+                    his_att = F.softmax(self.w5(query_mask + self.his_ent), dim=1)
+                    his_emb = his_att * self.his_ent
+                    his_emb = F.normalize(his_emb)
 
                 t2 = len(g_list)-i+1
                 h_t = torch.cos(self.weight_t2 * t2 + self.bias_t2).repeat(self.num_ents,1)
@@ -369,7 +380,7 @@ class RecurrentRGCN(nn.Module):
                     x_mean = torch.mean(x, dim=0, keepdim=True)
                     x_input[r_idx] = x_mean
                 x_input = self.emb_rel + x_input
-                current_h = self.rgcn.forward(g, self.h, [self.emb_rel, self.emb_rel], lg)
+                current_h = self.rgcn.forward(g, self.h, [self.emb_rel, self.emb_rel], pm_pd, lg)
                 current_h = F.normalize(current_h) if self.layer_norm else current_h
                 # current_h1 = F.sigmoid(self.w6(current_h))   # 让相应的维度大小早）0~1之间，通过mask矩阵获取query time 出现的实体，其他实体设置为0
                 att_e = F.softmax(self.w2(query_mask+current_h),dim=1)
@@ -500,26 +511,26 @@ class RecurrentRGCN(nn.Module):
                 x2 = self.w_cl(query2)
                 loss_cl += self.get_loss_conv(x1, x2)
 
-
-        for time_step, evolve_emb in enumerate(history_embs):
-            angle = 90 // len(history_embs)
-            # step = (self.angle * math.pi / 180) * (time_step + 1)
-            step = (self.angle * math.pi / 180) * (time_step + 1)
-            if self.layer_norm:
-                sim_matrix = torch.sum(static_emb * F.normalize(evolve_emb), dim=1)
-            else:
-                sim_matrix = torch.sum(static_emb * evolve_emb, dim=1)
-                c = torch.norm(static_emb, p=2, dim=1) * torch.norm(evolve_emb, p=2, dim=1)
-                sim_matrix = sim_matrix / c
-            mask = (math.cos(step) - sim_matrix) > 0
-            loss_cp += self.static_alpha*self.weight * torch.sum(torch.masked_select(math.cos(step) - sim_matrix, mask))
+            for time_step, evolve_emb in enumerate(history_embs):
+                angle = 90 // len(history_embs)
+                # step = (self.angle * math.pi / 180) * (time_step + 1)
+                step = (self.angle * math.pi / 180) * (time_step + 1)
+                if self.layer_norm:
+                    sim_matrix = torch.sum(static_emb * F.normalize(evolve_emb), dim=1)
+                else:
+                    sim_matrix = torch.sum(static_emb * evolve_emb, dim=1)
+                    c = torch.norm(static_emb, p=2, dim=1) * torch.norm(evolve_emb, p=2, dim=1)
+                    sim_matrix = sim_matrix / c
+                mask = (math.cos(step) - sim_matrix) > 0
+                loss_cp += self.static_alpha * self.weight * torch.sum(
+                    torch.masked_select(math.cos(step) - sim_matrix, mask))
 
         return loss_ent, loss_rel, loss_cp, loss_cl
 
-    def all_GCN(self,ent_emb, sub_graph, use_cuda):
+    def all_GCN(self,ent_emb, sub_graph, use_cuda, pm_pd, lg):
         sub_graph = sub_graph.to(self.gpu)
         sub_graph.ndata['h'] = ent_emb 
-        his_emb = self.his_rgcn_layer.forward(sub_graph, ent_emb, [self.emb_rel, self.emb_rel])
+        his_emb = self.his_rgcn_layer.forward(sub_graph, ent_emb, [self.emb_rel, self.emb_rel], pm_pd, lg)
         subg_index = torch.masked_select(
                 torch.arange(0, sub_graph.number_of_nodes(), dtype=torch.long).cuda(),
                 (sub_graph.in_degrees(range(sub_graph.number_of_nodes())) > 0))

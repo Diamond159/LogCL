@@ -366,12 +366,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     input_list = train_list[train_sample_num - args.train_history_len:
                                        train_sample_num]
                     tlist = torch.Tensor(list(range(train_sample_num - args.train_history_len, train_sample_num))).cuda()
-                # 聚合关系的RGCN，构造关系超图的DGL对象，同样组织为DGL对象的列表
-                history_super_glist = []
-                for sub_g in input_list:
-                    rel_head, rel_tail = get_relhead_reltal(sub_g, num_nodes, num_rels)
-                    super_sub_g = build_super_g(num_rels, rel_head, rel_tail, use_cuda, False, args.gpu)
-                    history_super_glist.append(super_sub_g)
+
 
                 subgraph_arr = np.load('../data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
                 subgraph_arr_inv = np.load('../data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
@@ -520,7 +515,7 @@ if __name__ == '__main__':
                         help="do relation prediction")
 
     # configuration for stat training
-    parser.add_argument("--n-epochs", type=int, default=25,
+    parser.add_argument("--n-epochs", type=int, default=100,
                         help="number of minimum training epochs on each time step")
     parser.add_argument("--lr", type=float, default=0.001,
                         help="learning rate")
@@ -577,7 +572,7 @@ if __name__ == '__main__':
     args.add_static_graph = True  # 是否使用静态图信息
     args.temperature = 0.03  # 对比学习的温度
     args.batch_size = 32  # 批量大小
-    args.use_cl = True  # 是否使用对比学习
+    args.use_cl = True  # 是否使用显示时间对比学习
 
     print(args)
     args.__dict__["test_history_len"] = args.__dict__["train_history_len"]

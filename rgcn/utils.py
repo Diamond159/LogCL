@@ -112,7 +112,7 @@ def build_graph(num_nodes, num_rels, triples, use_cuda, gpu):
         return norm
     # print("the num of dict", len(sro_to_fre))
     # triples = np.array(triples)
-    src, rel, dst,fre= triples.transpose()
+    src, rel, dst, fre= triples.transpose()
 
     g = dgl.graph((src, dst), num_nodes=num_nodes)
     # g.add_nodes(num_nodes)
