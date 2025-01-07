@@ -406,7 +406,7 @@ class RecurrentRGCN(nn.Module):
                 att_embs.append(att_emb.unsqueeze(0))
             att_ent = torch.mean(torch.concat(att_embs,dim=0),dim=0)
             att_ent = F.normalize(att_ent)
-            history_emb=  att_ent+history_embs[-1]
+            history_emb = att_ent+history_embs[-1]
             history_emb = F.normalize(history_emb) if self.layer_norm else history_emb
         else:
             self.hr = None
@@ -440,9 +440,9 @@ class RecurrentRGCN(nn.Module):
 
             if self.pre_type == "all":
 
-                scores_ob,_= self.decoder_ob.forward( embedding,r_emb, all_triples,  his_emb, self.pre_weight, self.pre_type)
+                scores_ob, _= self.decoder_ob.forward(embedding, r_emb, all_triples,  his_emb, self.pre_weight, self.pre_type)
                 score_seq = F.softmax(scores_ob, dim=1)
-                score_en =score_seq
+                score_en = score_seq
             scores_en = torch.log(score_en)
             return all_triples, scores_en
 

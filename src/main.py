@@ -541,8 +541,10 @@ if __name__ == '__main__':
                         help="history length")
     parser.add_argument("--test-history-len", type=int, default=20,
                         help="history length for test")
-    parser.add_argument("--dilate-len", type=int, default=1,
+    parser.add_argument("--dilate-len", default=True,
                         help="dilate history graph")
+    parser.add_argument("--add-pm-pd", action='store_true', default=True,
+                        help="是否添加pm_pd")
 
 
     args = parser.parse_args()
