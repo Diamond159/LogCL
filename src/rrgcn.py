@@ -339,7 +339,7 @@ class RecurrentRGCN(nn.Module):
         # input = [F.normalize(self.get_dynamic_emb(static_emb,t))]
         # self.h = input[-1]
 
-        # #-----------------全局历史建模-------------------------------------
+        # #-----------------全局历史建模-------------------------------------        # 改到glist循环内, 让局部和全局历史信息都增加线图
         # self.his_ent, subg_index = self.all_GCN(self.h, sub_graph,use_cuda)     # 全局历史实体嵌入his_ent
         # his_r_emb = F.normalize(self.emb_rel)  # 全局历史关系嵌入his_r_emb
         # his_att = F.softmax(self.w5(query_mask+ self.his_ent),dim=1)
@@ -484,7 +484,7 @@ class RecurrentRGCN(nn.Module):
         query_emb = self.w1(torch.concat([e1_emb,rel_emb],dim=1))
         query_mask[uniq_e] = query_emb
 
-        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs,history_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0],input_list,num_nodes, use_cuda)
+        embedding, static_emb, r_emb, his_emb, his_r_emb, his_temp_embs, his_rel_embs, history_embs = self.forward(sub_graph, T_idx, query_mask, glist, static_graph, tlist[0] ,input_list ,num_nodes , use_cuda)
 
 
 

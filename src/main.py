@@ -379,15 +379,24 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 que_pair_inv =  e2r(inverse_triples, num_rels)
                 # generate history graph
                 history_glist = [build_sub_graph(num_nodes, num_rels, snap, use_cuda, args.gpu) for snap in input_list]
+
+                input_list_inv = np.array([
+                    [triple[2], triple[1], triple[0]]  # 交换 head 和 tail，关系加上偏移量     + num_rels
+                    for triple in input_list
+                ])
+
+                history_glist_inv = [
+                    build_sub_graph(num_nodes, num_rels, snap_inv, use_cuda, args.gpu) for snap_inv in input_list_inv
+                ]
                 triples = torch.from_numpy(output[0]).long().cuda()
                 inverse_triples = torch.from_numpy(inverse_triples).long().cuda()
                 for id in range(2):
                     if id % 2 ==0:
                         loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, tlist,input_list,num_nodes, use_cuda)
                     else:
-                        loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist, inverse_triples,static_graph, tlist,input_list,num_nodes, use_cuda)
+                        loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist_inv, inverse_triples,static_graph, tlist,input_list,num_nodes, use_cuda)
 
-                    loss = loss_e+ loss_cp +loss_cl
+                    loss = loss_e + loss_cp + loss_cl
 
                     losses.append(loss.item())
                     losses_e.append(loss_e.item())
