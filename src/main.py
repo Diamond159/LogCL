@@ -45,6 +45,28 @@ def append_entity_metrics_to_excel(row, excel_path='./result/entity_prediction_m
         print("[Excel] Skip export: openpyxl is not installed. Please install openpyxl.")
 
 
+def load_id_name_map(file_path):
+    id_to_name = {}
+    with open(file_path, 'r', encoding='utf-8') as f:
+        for line in f:
+            line = line.strip()
+            if not line:
+                continue
+            parts = line.split('\t')
+            if len(parts) != 2:
+                continue
+            name, idx = parts
+            id_to_name[int(idx)] = name
+    return id_to_name
+
+
+def relation_id_to_name(rel_id, num_rels, rel_id_to_name):
+    if rel_id < num_rels:
+        return rel_id_to_name.get(rel_id, str(rel_id))
+    base_id = rel_id - num_rels
+    return rel_id_to_name.get(base_id, str(base_id)) + "_inv"
+
+
 def update_dict(subg_arr, s_to_sro, sr_to_sro,sro_to_fre, num_rels):
     # 维护历史查询索引: s->(s,r,o) 与 (s,r)->o。
     # 该字典在局部/全局历史采样阶段复用，用于快速构造候选历史边。
@@ -80,12 +102,8 @@ def e2r(triplets, num_rels):
     return [uniq_e, r_len, r_idx]
 
 def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples,num_nodes, num_rels, use_cuda, gpu):
-    # q_to_sro = defaultdict(list)
-    q_to_sro = set()
     inverse_triples = triples[:, [2, 1, 0]]
     inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
-    all_triples = np.concatenate([triples, inverse_triples])
-    # ent_set = set(all_triples[:, 0])
     src_set = set(triples[:, 0])
     dst_set = set(triples[:, 0])
 
@@ -94,34 +112,40 @@ def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples,num_nodes, num_r
     # er_list = list(set([(tri[0],tri[1]) for tri in all_triples]))
     er_list = list(set([(tri[0],tri[1]) for tri in triples]))
     er_list_inv = list(set([(tri[0],tri[1]) for tri in inverse_triples]))
-    # ent_list = list(ent_set)
-    # rel_list = list(set(all_triples[:, 1]))
-
+    # 用字典计数替代 DataFrame.groupby，降低内存峰值并避免分组异常。
     inverse_subg = subg_arr[:, [2, 1, 0]]
     inverse_subg[:, 1] = inverse_subg[:, 1] + num_rels
     subg_triples = np.concatenate([subg_arr, inverse_subg])
-    df = pd.DataFrame(np.array(subg_triples), columns=['src', 'rel', 'dst'])
-    #整合重复三元组并统计三元组的频率，将三元组的频率作为第四列数据
-    subg_df = df.groupby(df.columns.tolist()).size().reset_index().rename(columns={0:'freq'}) 
-    keys = list(sr_to_sro.keys())
-    values = list(sr_to_sro.values())
-    df_dic =  pd.DataFrame({'sr': keys, 'dst': values}) #将查询字段转化为pandas
 
-    dst_df = df_dic.query('sr in @er_list')  #获取查询实体和关系的pandas
-    dst_get = dst_df['dst'].values    #获取目标尾实体
-    two_ent = set().union(*dst_get)   #将头实体与尾实体进行整合
-    all_ent = list(src_set|two_ent)   
-    result = subg_df.query('src in @all_ent')
+    triple_freq = defaultdict(int)
+    for s, r, d in subg_triples:
+        triple_freq[(int(s), int(r), int(d))] += 1
 
-    dst_df_inv = df_dic.query('sr in @er_list_inv')  #获取查询实体和关系的pandas
-    dst_get_inv = dst_df_inv['dst'].values    #获取目标尾实体
-    two_ent_inv = set().union(*dst_get_inv)   #将头实体与尾实体进行整合
-    all_ent_inv = list(dst_set|two_ent_inv)  
-    result_inv = subg_df.query('src in @all_ent_inv')
+    def collect_two_hop_entities(er_pairs):
+        ents = set()
+        for s, r in er_pairs:
+            dsts = sr_to_sro.get((int(s), int(r)))
+            if dsts:
+                ents.update(dsts)
+        return ents
+
+    two_ent = collect_two_hop_entities(er_list)
+    two_ent_inv = collect_two_hop_entities(er_list_inv)
+
+    all_ent = src_set | two_ent
+    all_ent_inv = dst_set | two_ent_inv
+
+    result = [[s, r, d, c] for (s, r, d), c in triple_freq.items() if s in all_ent]
+    result_inv = [[s, r, d, c] for (s, r, d), c in triple_freq.items() if s in all_ent_inv]
     #----------------二阶邻居采样-----------------------
     # result = subg_df.query('src in @src_set')
-    q_tri = result.to_numpy()
-    q_tri_inv = result_inv.to_numpy()
+    q_tri = np.array(result, dtype=np.int64)
+    q_tri_inv = np.array(result_inv, dtype=np.int64)
+
+    if q_tri.ndim == 1:
+        q_tri = q_tri.reshape(0, 4)
+    if q_tri_inv.ndim == 1:
+        q_tri_inv = q_tri_inv.reshape(0, 4)
 
     his_sub = build_graph(num_nodes, num_rels, q_tri, use_cuda, gpu) 
     his_sub_inv = build_graph(num_nodes, num_rels, q_tri_inv, use_cuda, gpu)
@@ -149,6 +173,10 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
     ranks_raw_inv, ranks_filter_inv, mrr_raw_list_inv, mrr_filter_list_inv = [], [], [], []
     ranks_raw_r_inv, ranks_filter_r_inv, mrr_raw_list_r_inv, mrr_filter_list_r_inv = [], [], [], []
     ranks_raw1, ranks_filter1 = [],[]
+    detailed_rows = []
+
+    entity_id_to_name = load_id_name_map('data/{}/entity2id.txt'.format(args.dataset))
+    rel_id_to_name = load_id_name_map('data/{}/relation2id.txt'.format(args.dataset))
 
     idx = 0
     if mode == "test":
@@ -207,6 +235,85 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
         ranks_filter.append(rank_filter)
         ranks_raw_inv.append(rank_raw_inv)
         ranks_filter_inv.append(rank_filter_inv)
+
+        # 逐样本导出（raw/filter 双口径），保证与日志指标可逐列对齐复算。
+        triples_np = test_triples.detach().cpu().numpy()
+        triples_inv_np = inv_test_triples.detach().cpu().numpy()
+
+        rank_raw_np = rank_raw.detach().cpu().numpy().astype(np.int64)
+        rank_filter_np = rank_filter.detach().cpu().numpy().astype(np.int64)
+        rank_raw_inv_np = rank_raw_inv.detach().cpu().numpy().astype(np.int64)
+        rank_filter_inv_np = rank_filter_inv.detach().cpu().numpy().astype(np.int64)
+
+        top1_raw = torch.argmax(final_score, dim=1).detach().cpu().numpy().astype(np.int64)
+        top1_raw_inv = torch.argmax(inv_final_score, dim=1).detach().cpu().numpy().astype(np.int64)
+
+        filter_score_forward = utils.filter_score(test_triples, final_score.detach().clone(), all_ans_list[time_idx])
+        filter_score_inverse = utils.filter_score(inv_test_triples, inv_final_score.detach().clone(), all_ans_list[time_idx])
+        top1_filter = torch.argmax(filter_score_forward, dim=1).detach().cpu().numpy().astype(np.int64)
+        top1_filter_inv = torch.argmax(filter_score_inverse, dim=1).detach().cpu().numpy().astype(np.int64)
+
+        for i, (h, r, t) in enumerate(triples_np):
+            rr_raw = 1.0 / int(rank_raw_np[i])
+            rr_filter = 1.0 / int(rank_filter_np[i])
+            pred_raw = int(top1_raw[i])
+            pred_filter = int(top1_filter[i])
+            detailed_rows.append({
+                'time_idx': int(time_idx),
+                'direction': 'forward',
+                'head_id': int(h),
+                'rel_id': int(r),
+                'tail_true_id': int(t),
+                'pred_tail_top1_raw_id': pred_raw,
+                'pred_tail_top1_filter_id': pred_filter,
+                'head_name': entity_id_to_name.get(int(h), str(int(h))),
+                'rel_name': relation_id_to_name(int(r), num_rels, rel_id_to_name),
+                'tail_true_name': entity_id_to_name.get(int(t), str(int(t))),
+                'pred_tail_top1_raw_name': entity_id_to_name.get(pred_raw, str(pred_raw)),
+                'pred_tail_top1_filter_name': entity_id_to_name.get(pred_filter, str(pred_filter)),
+                'raw_rank': int(rank_raw_np[i]),
+                'filter_rank': int(rank_filter_np[i]),
+                'rr_raw': rr_raw,
+                'rr_filter': rr_filter,
+                'mrr': rr_filter,
+                'is_hit1_raw': 1 if int(rank_raw_np[i]) <= 1 else 0,
+                'is_hit3_raw': 1 if int(rank_raw_np[i]) <= 3 else 0,
+                'is_hit10_raw': 1 if int(rank_raw_np[i]) <= 10 else 0,
+                'is_hit1_filter': 1 if int(rank_filter_np[i]) <= 1 else 0,
+                'is_hit3_filter': 1 if int(rank_filter_np[i]) <= 3 else 0,
+                'is_hit10_filter': 1 if int(rank_filter_np[i]) <= 10 else 0,
+            })
+
+        for i, (h, r, t) in enumerate(triples_inv_np):
+            rr_raw = 1.0 / int(rank_raw_inv_np[i])
+            rr_filter = 1.0 / int(rank_filter_inv_np[i])
+            pred_raw = int(top1_raw_inv[i])
+            pred_filter = int(top1_filter_inv[i])
+            detailed_rows.append({
+                'time_idx': int(time_idx),
+                'direction': 'inverse',
+                'head_id': int(h),
+                'rel_id': int(r),
+                'tail_true_id': int(t),
+                'pred_tail_top1_raw_id': pred_raw,
+                'pred_tail_top1_filter_id': pred_filter,
+                'head_name': entity_id_to_name.get(int(h), str(int(h))),
+                'rel_name': relation_id_to_name(int(r), num_rels, rel_id_to_name),
+                'tail_true_name': entity_id_to_name.get(int(t), str(int(t))),
+                'pred_tail_top1_raw_name': entity_id_to_name.get(pred_raw, str(pred_raw)),
+                'pred_tail_top1_filter_name': entity_id_to_name.get(pred_filter, str(pred_filter)),
+                'raw_rank': int(rank_raw_inv_np[i]),
+                'filter_rank': int(rank_filter_inv_np[i]),
+                'rr_raw': rr_raw,
+                'rr_filter': rr_filter,
+                'mrr': rr_filter,
+                'is_hit1_raw': 1 if int(rank_raw_inv_np[i]) <= 1 else 0,
+                'is_hit3_raw': 1 if int(rank_raw_inv_np[i]) <= 3 else 0,
+                'is_hit10_raw': 1 if int(rank_raw_inv_np[i]) <= 10 else 0,
+                'is_hit1_filter': 1 if int(rank_filter_inv_np[i]) <= 1 else 0,
+                'is_hit3_filter': 1 if int(rank_filter_inv_np[i]) <= 3 else 0,
+                'is_hit10_filter': 1 if int(rank_filter_inv_np[i]) <= 10 else 0,
+            })
             # used to show slide results
         if args.multi_step:
             if not args.relation_evaluation:    
@@ -279,6 +386,41 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
                 'all_MRR':all_mrr_raw.item(),'all_H@1':all_hit_raw[0],'all_H@3':all_hit_raw[1],'all_H@10':all_hit_raw[2],
                 'filter_all_MRR':all_mrr_filter.item(),'filter_all_H@1':all_hit_filter[0],'filter_all_H@3':all_hit_filter[1],'filter_all_H@10':all_hit_filter[2]}
             writer.writerow(row.values())
+
+        detail_df = pd.DataFrame(detailed_rows)
+
+        def summarize(df, scope, prefix):
+            return {
+                'scope': scope,
+                'metric_type': prefix,
+                'MRR': float(df['rr_{}'.format(prefix)].mean()),
+                'Hits@1': float(df['is_hit1_{}'.format(prefix)].mean()),
+                'Hits@3': float(df['is_hit3_{}'.format(prefix)].mean()),
+                'Hits@10': float(df['is_hit10_{}'.format(prefix)].mean()),
+            }
+
+        df_forward = detail_df[detail_df['direction'] == 'forward']
+        df_inverse = detail_df[detail_df['direction'] == 'inverse']
+        summary_rows = [
+            summarize(df_forward, 'forward', 'raw'),
+            summarize(df_forward, 'forward', 'filter'),
+            summarize(df_inverse, 'inverse', 'raw'),
+            summarize(df_inverse, 'inverse', 'filter'),
+            summarize(detail_df, 'all', 'raw'),
+            summarize(detail_df, 'all', 'filter'),
+        ]
+        summary_df = pd.DataFrame(summary_rows)
+
+        excel_output_dir = getattr(args, 'log_dir', './result')
+        os.makedirs(excel_output_dir, exist_ok=True)
+        detail_file = os.path.join(excel_output_dir, '{}_prediction_details_{}.xlsx'.format(args.dataset, int(time.time())))
+        try:
+            with pd.ExcelWriter(detail_file, engine='openpyxl') as writer:
+                detail_df.to_excel(writer, sheet_name='detailed_predictions', index=False)
+                summary_df.to_excel(writer, sheet_name='metrics_from_details', index=False)
+            print('[Excel] Detailed prediction rows saved to {}'.format(detail_file))
+        except ImportError:
+            print("[Excel] Skip detailed export: openpyxl is not installed. Please install openpyxl.")
 
     return all_mrr_raw, all_mrr_filter, entity_metrics
 
@@ -414,7 +556,8 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
             'model_state_file': model_state_file,
         }
         test_row.update(test_metrics)
-        append_entity_metrics_to_excel(test_row)
+        metrics_excel_path = os.path.join(getattr(args, 'log_dir', './result'), 'entity_prediction_metrics.xlsx')
+        append_entity_metrics_to_excel(test_row, excel_path=metrics_excel_path)
     elif args.test and not os.path.exists(model_state_file):
         print("--------------{} not exist, Change mode to train and generate stat for testing----------------\n".format(model_state_file))
     else:
@@ -567,13 +710,15 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
             valid_row['result_split'] = 'valid_best'
             valid_row['best_epoch'] = best_epoch
             valid_row.update(best_valid_metrics)
-            append_entity_metrics_to_excel(valid_row)
+            metrics_excel_path = os.path.join(getattr(args, 'log_dir', './result'), 'entity_prediction_metrics.xlsx')
+            append_entity_metrics_to_excel(valid_row, excel_path=metrics_excel_path)
 
         test_row = dict(excel_common)
         test_row['result_split'] = 'test_final'
         test_row['best_epoch'] = best_epoch
         test_row.update(test_metrics)
-        append_entity_metrics_to_excel(test_row)
+        metrics_excel_path = os.path.join(getattr(args, 'log_dir', './result'), 'entity_prediction_metrics.xlsx')
+        append_entity_metrics_to_excel(test_row, excel_path=metrics_excel_path)
 
         return mrr_raw, mrr_filter
     return mrr_raw, mrr_filter
@@ -697,6 +842,7 @@ if __name__ == '__main__':
         str(now.minute)
     )
     os.makedirs(log_dir, exist_ok=True)
+    args.log_dir = log_dir
     
     # 日志文件路径
     log_file = os.path.join(log_dir, "experiment.log")
