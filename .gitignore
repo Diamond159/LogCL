@@ -1,0 +1,12 @@
+checkpoints/
+data/
+results/
+models/
+experiments/
+logs/
+data/ICEW14/
+result/
+.idea/
+*.pyc
+.vscode/
+__pycache__/

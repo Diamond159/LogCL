@@ -27,6 +27,7 @@ class ConvTransR(torch.nn.Module):
         self.bn_init = torch.nn.BatchNorm1d(embedding_dim)
 
     def forward(self, embedding, emb_rel, triplets, nodes_id=None, mode="train", negative_rate=0):
+        # 关系预测分支: 使用 (head, tail) 卷积特征匹配关系类型。
 
         # e1_embedded_all = F.tanh(embedding)
         e1_embedded_all = embedding
@@ -76,6 +77,7 @@ class ConvTransE(torch.nn.Module):
         self.bn_init = torch.nn.BatchNorm1d(embedding_dim)
 
     def forward(self, embedding, emb_rel, triplets, his_emb, pre_weight, pre_type, partial_embeding=None):
+        # 实体预测分支: 局部实体流与全局历史流按 pre_weight 融合后进行 ConvTransE 解码。
         # e1_embedded_all = embedding
         batch_size = len(triplets)
         if pre_type =="all":
@@ -83,6 +85,9 @@ class ConvTransE(torch.nn.Module):
             embedded_his = F.tanh(his_emb)
             e1_embedded = e1_embedded_all[triplets[:, 0]].unsqueeze(1)
             e1_his_embedded = embedded_his[triplets[:, 0]].unsqueeze(1)
+            # 双流融合点:
+            # local(e1_embedded) 负责短期结构变化，global(e1_his_embedded) 负责长期语义趋势。
+            # pre_weight 越大，模型越偏向近期动态；越小，越偏向历史稳态语义。
             e1_embed = pre_weight*e1_embedded + (1-pre_weight)*e1_his_embedded
         rel_embedded = emb_rel[triplets[:, 1]].unsqueeze(1)
         stacked_inputs = torch.cat([e1_embed, rel_embedded], 1)
@@ -100,6 +105,8 @@ class ConvTransE(torch.nn.Module):
         x = F.relu(x)
         cl_x = x
         if partial_embeding is None:
+            # 全实体打分，对应链路预测中的 tail ranking。
+            # 在双流融合后进行全实体排序，可直接反映“解耦后表示”的预测区分度。
             x = torch.mm(x, e1_embedded_all.transpose(1, 0))
         else:
             x = torch.mm(x, partial_embeding.transpose(1, 0))

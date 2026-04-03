@@ -24,8 +24,30 @@ import warnings
 warnings.filterwarnings('ignore')
 
 
+def append_entity_metrics_to_excel(row, excel_path='./result/entity_prediction_metrics.xlsx', sheet_name='entity_prediction'):
+    """Append one experiment row to an Excel sheet for paper-ready filtering."""
+    os.makedirs(os.path.dirname(excel_path), exist_ok=True)
+    row_df = pd.DataFrame([row])
+
+    try:
+        if os.path.exists(excel_path):
+            try:
+                history_df = pd.read_excel(excel_path, sheet_name=sheet_name)
+            except ValueError:
+                history_df = pd.DataFrame()
+            out_df = pd.concat([history_df, row_df], ignore_index=True)
+        else:
+            out_df = row_df
+
+        out_df.to_excel(excel_path, sheet_name=sheet_name, index=False)
+        print("[Excel] Entity metrics appended to {}".format(excel_path))
+    except ImportError:
+        print("[Excel] Skip export: openpyxl is not installed. Please install openpyxl.")
+
+
 def update_dict(subg_arr, s_to_sro, sr_to_sro,sro_to_fre, num_rels):
-    # 根据输入的每一个时间的图来更新查询查询
+    # 维护历史查询索引: s->(s,r,o) 与 (s,r)->o。
+    # 该字典在局部/全局历史采样阶段复用，用于快速构造候选历史边。
     inverse_subg = subg_arr[:, [2, 1, 0]]
     inverse_subg[:, 1] = inverse_subg[:, 1] + num_rels
     subg_triples = np.concatenate([subg_arr, inverse_subg])
@@ -34,7 +56,8 @@ def update_dict(subg_arr, s_to_sro, sr_to_sro,sro_to_fre, num_rels):
         sr_to_sro[(src, rel)].add(dst)
         
 def e2r(triplets, num_rels):
-    # 统计同一个查询实体连接不同的关系
+    # 将“实体->关系集合”整理成紧凑张量，供关系池化与查询门控使用。
+    # 对应 paper_mapping 中关系建模层的关系统计池化输入。
     src, rel, dst = triplets.transpose()
     # get all relations
     # uniq_e = np.concatenate((src, dst))
@@ -67,6 +90,7 @@ def get_sample_from_history_graph3(subg_arr, sr_to_sro, triples,num_nodes, num_r
     dst_set = set(triples[:, 0])
 
     # ----------------二阶邻居采样-----------------------
+    # 先按 (s,r) 取一跳候选尾实体，再把候选实体回查到历史子图中，形成二阶历史上下文。
     # er_list = list(set([(tri[0],tri[1]) for tri in all_triples]))
     er_list = list(set([(tri[0],tri[1]) for tri in triples]))
     er_list_inv = list(set([(tri[0],tri[1]) for tri in inverse_triples]))
@@ -139,14 +163,14 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
         model.load_state_dict(checkpoint['state_dict'])
 
     model.eval()
-    # do not have inverse relation in test input
+    # 测试阶段使用滑动历史窗口，逐快照外推。
     input_list = [snap for snap in history_list[-args.test_history_len:]]
 
     start_time = len(history_list)
 
     his_list = history_list[:]
     subg_arr = np.concatenate(his_list)
-    sr_to_sro = np.load('../data/{}/his_dict/train_s_r.npy'.format(args.dataset), allow_pickle=True).item()
+    sr_to_sro = np.load('data/{}/his_dict/train_s_r.npy'.format(args.dataset), allow_pickle=True).item()
 
     
     for time_idx, test_snap in enumerate(tqdm(test_list)):
@@ -155,6 +179,7 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
         # tlist = [min(start_time-args.start_history_len-1,t) for t in tlist]
         tlist = torch.Tensor(tlist).cuda()
 
+        # 构建局部历史图序列，对应实体建模层的历史快照输入。
         history_glist = [build_sub_graph(num_nodes, num_rels, g, use_cuda, args.gpu) for g in input_list]
         inverse_triples =test_snap[:, [2, 1, 0]]
         inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
@@ -173,7 +198,7 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
                                                           num_rels, static_graph, test_triples_input_inv, input_list,
                                                           num_nodes, use_cuda)
 
-        # TODO  更新all_filter的计算机制 连接之后取softmax
+        # 评估时同时统计正向与反向查询，最终按论文口径汇总 all_* 指标。
 
         mrr_filter_snap, mrr_snap, rank_raw, rank_filter = utils.get_total_rank(test_triples, final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
         mrr_filter_snap_inv, mrr_snap_inv, rank_raw_inv, rank_filter_inv = utils.get_total_rank(inv_test_triples, inv_final_score, all_ans_list[time_idx], eval_bz=1000, rel_predict=0)
@@ -210,8 +235,27 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
         all_hit_filter.append((hit_filter[hit_id]+hit_filter_inv[hit_id])/2)
     print("(all_raw) MRR, Hits@ (1,3,10):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_raw.item(), all_hit_raw[0],all_hit_raw[1],all_hit_raw[2]))
     print("(all_filter) MRR, Hits@ (1,3,10):{:.6f}, {:.6f}, {:.6f}, {:.6f}".format( all_mrr_filter.item(), all_hit_filter[0],all_hit_filter[1],all_hit_filter[2]))
+
+    entity_metrics = {
+        'filter_MRR': float(mrr_filter),
+        'filter_H@1': hit_filter[0],
+        'filter_H@3': hit_filter[1],
+        'filter_H@10': hit_filter[2],
+        'filter_inv_MRR': float(mrr_filter_inv),
+        'filter_inv_H@1': hit_filter_inv[0],
+        'filter_inv_H@3': hit_filter_inv[1],
+        'filter_inv_H@10': hit_filter_inv[2],
+        'all_MRR': all_mrr_raw.item(),
+        'all_H@1': all_hit_raw[0],
+        'all_H@3': all_hit_raw[1],
+        'all_H@10': all_hit_raw[2],
+        'filter_all_MRR': all_mrr_filter.item(),
+        'filter_all_H@1': all_hit_filter[0],
+        'filter_all_H@3': all_hit_filter[1],
+        'filter_all_H@10': all_hit_filter[2],
+    }
     
-    # 文件转储
+    # 文件转储: 仅在 test 模式输出到 ./result/*.csv，便于实验表格复现。
     if mode == "test": # test模式写入，train模式忽略
         filename = './result/'+ args.dataset + ".csv"
         if os.path.isfile(filename) == False:# 如果文件不存在，则创建
@@ -235,8 +279,8 @@ def test(model ,history_len, history_list, test_list, num_rels, num_nodes, use_c
                 'all_MRR':all_mrr_raw.item(),'all_H@1':all_hit_raw[0],'all_H@3':all_hit_raw[1],'all_H@10':all_hit_raw[2],
                 'filter_all_MRR':all_mrr_filter.item(),'filter_all_H@1':all_hit_filter[0],'filter_all_H@3':all_hit_filter[1],'filter_all_H@10':all_hit_filter[2]}
             writer.writerow(row.values())
-            
-    return all_mrr_raw, all_mrr_filter
+
+    return all_mrr_raw, all_mrr_filter, entity_metrics
 
 
 def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=None):
@@ -250,7 +294,7 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     if n_bases:
         args.n_bases = n_bases
 
-    # load graph data
+    # 1) 数据准备: 动态快照切分 + filtered 评估答案字典。
     print("loading graph data")
     data = utils.load_data(args.dataset)
     train_list = utils.split_by_time(data.train)
@@ -272,8 +316,9 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
 
     use_cuda = args.gpu >= 0 and torch.cuda.is_available()
 
+    # 2) 静态属性图: e-w-graph 作为语义锚点，供静态约束分支使用。
     if args.add_static_graph:
-        static_triples = np.array(_read_triplets_as_list("../data/" + args.dataset + "/e-w-graph.txt", {}, {}, load_time=False))
+        static_triples = np.array(_read_triplets_as_list("data/" + args.dataset + "/e-w-graph.txt", {}, {}, load_time=False))
         num_static_rels = len(np.unique(static_triples[:, 1]))
         num_words = len(np.unique(static_triples[:, 2]))
         static_triples[:, 2] = static_triples[:, 2] + num_nodes 
@@ -283,7 +328,11 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
         num_static_rels, num_words, static_triples, static_graph = 0, 0, [], None
 
 
-    # create stat
+    # 3) 构建 DSPN-CL 主模型:
+    #    - 实体中心结构演化流: 历史快照 RGCN + GRU
+    #    - 关系中心独立交互流: 关系池化 + 时间门控
+    #    - 跨流对比学习: use_cl + temperature
+    #    - 静态锚点约束: add_static_graph + weight + angle
     model = RecurrentRGCN(args.decoder,
                           args.encoder,
                         num_nodes,
@@ -325,11 +374,12 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
     if args.add_static_graph:
         static_graph = build_sub_graph(len(static_node_id), num_static_rels, static_triples, use_cuda, args.gpu)
 
-    # optimizer
+    # 4) 优化器设置。
     optimizer = torch.optim.Adam(model.parameters(), lr=args.lr, weight_decay=1e-5)
+    mrr_raw, mrr_filter = None, None
 
     if args.test and os.path.exists(model_state_file):
-        mrr_raw, mrr_filter= test(model,
+        mrr_raw, mrr_filter, test_metrics = test(model,
                                 args.train_history_len,
                                 train_list+valid_list, 
                                 test_list, 
@@ -341,12 +391,39 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                                 model_state_file, 
                                 static_graph, 
                                 "test")
+        test_row = {
+            'dataset': args.dataset,
+            'result_split': 'test_final',
+            'best_epoch': -1,
+            'encoder': args.encoder,
+            'decoder': args.decoder,
+            'pre_type': args.pre_type,
+            'use_static': args.add_static_graph,
+            'use_cl': args.use_cl,
+            'gpu': args.gpu,
+            'datetime': datetime.now(),
+            'pre_weight': args.pre_weight,
+            'train_len': args.train_history_len,
+            'test_len': args.test_history_len,
+            'temperature': args.temperature,
+            'lr': args.lr,
+            'n_hidden': args.n_hidden,
+            'weight': args.weight,
+            'angle': args.angle,
+            'discount': args.discount,
+            'model_state_file': model_state_file,
+        }
+        test_row.update(test_metrics)
+        append_entity_metrics_to_excel(test_row)
     elif args.test and not os.path.exists(model_state_file):
         print("--------------{} not exist, Change mode to train and generate stat for testing----------------\n".format(model_state_file))
     else:
         print("----------------------------------------start training----------------------------------------\n")
         best_mrr = 0
         his_best = 0
+        best_valid_metrics = None
+        best_epoch = -1
+        # 5) 训练循环: 每个时间快照执行一次时序外推训练。
         for epoch in range(args.n_epochs):
             model.train()
             losses = []
@@ -368,16 +445,18 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     tlist = torch.Tensor(list(range(train_sample_num - args.train_history_len, train_sample_num))).cuda()
 
 
-                subgraph_arr = np.load('../data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
-                subgraph_arr_inv = np.load('../data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
+                # 预处理历史子图: 提供局部实体流与关系流的结构证据输入。
+                subgraph_arr = np.load('data/{}/his_graph_for/train_s_r_{}.npy'.format(args.dataset, train_sample_num))
+                subgraph_arr_inv = np.load('data/{}/his_graph_inv/train_o_r_{}.npy'.format(args.dataset, train_sample_num))
                 subg_snap = build_graph(num_nodes, num_rels, subgraph_arr, use_cuda, args.gpu)   #取出采样子图
                 subg_snap_inv = build_graph(num_nodes, num_rels, subgraph_arr_inv, use_cuda, args.gpu)
 
                 inverse_triples = output[0][:, [2, 1, 0]]
                 inverse_triples[:, 1] = inverse_triples[:, 1] + num_rels
+                # que_pair/que_pair_inv 用于 query-aware 掩码，强调“当前待预测实体相关关系”信息。
                 que_pair =  e2r(output[0], num_rels)
                 que_pair_inv =  e2r(inverse_triples, num_rels)
-                # generate history graph
+                # 历史图序列: 对应 paper_mapping 中实体建模层的历史快照输入。
                 history_glist = [build_sub_graph(num_nodes, num_rels, snap, use_cuda, args.gpu) for snap in input_list]
 
                 input_list_inv = np.array([
@@ -390,12 +469,14 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                 ]
                 triples = torch.from_numpy(output[0]).long().cuda()
                 inverse_triples = torch.from_numpy(inverse_triples).long().cuda()
+                # 正/反向三元组联合训练，提升关系方向鲁棒性。
                 for id in range(2):
                     if id % 2 ==0:
                         loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair, subg_snap, train_sample_num, history_glist, triples, static_graph, tlist,input_list,num_nodes, use_cuda)
                     else:
                         loss_e, loss_r, loss_cp, loss_cl = model.get_loss(que_pair_inv, subg_snap_inv, train_sample_num, history_glist_inv, inverse_triples,static_graph, tlist,input_list,num_nodes, use_cuda)
 
+                    # 总损失 = 实体预测 + 静态锚点约束 + 跨流对比一致性。
                     loss = loss_e + loss_cp + loss_cl
 
                     losses.append(loss.item())
@@ -410,9 +491,9 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
             print("Epoch {:04d} | Ave Loss: {:.4f} | entity-relation-static:{:.4f}-{:.4f}-{:.4f} Best MRR {:.4f} | Model {} "
                   .format(epoch, np.mean(losses), np.mean(losses_e), np.mean(losses_r), np.mean(losses_cp), best_mrr, model_name))
 
-            # validation
+            # 6) 验证与早停: 以 filtered MRR 选择最佳模型。
             if epoch and epoch % args.evaluate_every == 0:
-                mrr_raw, mrr_filter = test(model,
+                mrr_raw, mrr_filter, valid_metrics = test(model,
                                     args.train_history_len,
                                     train_list, 
                                     valid_list, 
@@ -435,9 +516,19 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                     else:
                         his_best=0
                         best_mrr = mrr_filter
+                        best_valid_metrics = valid_metrics
+                        best_epoch = epoch
                         torch.save({'state_dict': model.state_dict(), 'epoch': epoch}, model_state_file)
             torch.cuda.empty_cache()
-        mrr_raw, mrr_filter = test(model,
+
+        # 当训练轮数过少（如 n_epochs=1）未触发验证保存时，兜底保存当前参数供测试加载。
+        if not os.path.exists(model_state_file):
+            fallback_epoch = max(args.n_epochs - 1, 0)
+            torch.save({'state_dict': model.state_dict(), 'epoch': fallback_epoch}, model_state_file)
+            if best_epoch < 0:
+                best_epoch = fallback_epoch
+
+        mrr_raw, mrr_filter, test_metrics = test(model,
                             args.train_history_len,
                             train_list+valid_list,
                             test_list, 
@@ -449,6 +540,42 @@ def run_experiment(args, n_hidden=None, n_layers=None, dropout=None, n_bases=Non
                             model_state_file, 
                             static_graph, 
                             mode="test")
+
+        # 训练结束后导出“最终验证(best valid)”与“最终测试(final test)”的实体预测指标到 Excel。
+        excel_common = {
+            'dataset': args.dataset,
+            'encoder': args.encoder,
+            'decoder': args.decoder,
+            'pre_type': args.pre_type,
+            'use_static': args.add_static_graph,
+            'use_cl': args.use_cl,
+            'gpu': args.gpu,
+            'datetime': datetime.now(),
+            'pre_weight': args.pre_weight,
+            'train_len': args.train_history_len,
+            'test_len': args.test_history_len,
+            'temperature': args.temperature,
+            'lr': args.lr,
+            'n_hidden': args.n_hidden,
+            'weight': args.weight,
+            'angle': args.angle,
+            'discount': args.discount,
+            'model_state_file': model_state_file,
+        }
+        if best_valid_metrics is not None:
+            valid_row = dict(excel_common)
+            valid_row['result_split'] = 'valid_best'
+            valid_row['best_epoch'] = best_epoch
+            valid_row.update(best_valid_metrics)
+            append_entity_metrics_to_excel(valid_row)
+
+        test_row = dict(excel_common)
+        test_row['result_split'] = 'test_final'
+        test_row['best_epoch'] = best_epoch
+        test_row.update(test_metrics)
+        append_entity_metrics_to_excel(test_row)
+
+        return mrr_raw, mrr_filter
     return mrr_raw, mrr_filter
 
 
@@ -558,36 +685,78 @@ if __name__ == '__main__':
 
     args = parser.parse_args()
 
+    # === 设置日志和参数保存目录 ===
+    # 采用 checkpoints/YYYY/M/D/H/M 结构，保留完整实验追踪信息。
+    now = datetime.now()
+    log_dir = os.path.join(
+        "checkpoints", 
+        str(now.year), 
+        str(now.month), 
+        str(now.day), 
+        str(now.hour), 
+        str(now.minute)
+    )
+    os.makedirs(log_dir, exist_ok=True)
+    
+    # 日志文件路径
+    log_file = os.path.join(log_dir, "experiment.log")
+    args_file = os.path.join(log_dir, "args.log")
+    
+    # 替换系统输出同时保存到文件和终端
+    class Logger(object):
+        def __init__(self, filename):
+            self.terminal = sys.stdout
+            self.log = open(filename, "a", encoding="utf-8")
 
-    # %%
-    # 定义参数变量
-    args.dataset = "ICEWS14"  # 数据集名称
-    args.train_history_len = 7  # 训练历史长度
-    args.test_history_len = 7  # 测试历史长度
-    args.dilate_len = 1  # 扩张历史图长度
-    args.lr = 0.001  # 学习率
-    args.n_layers = 2  # 传播层数
-    args.evaluate_every = 1  # 每n轮进行评估
-    args.gpu = 0  # GPU ID
-    args.n_hidden = 200  # 隐藏单元数量
-    args.self_loop = True  # 是否使用自环
-    args.decoder = "convtranse"  # 解码器类型
-    args.encoder = "uvrgcn"  # 编码器类型
-    args.layer_norm = True  # 是否使用层归一化
-    args.weight = 0.5  # 静态约束权重
-    args.entity_prediction = True  # 是否添加实体预测损失
-    args.angle = 10  # 演变速度
-    args.discount = 1  # 静态约束的折扣
-    args.pre_weight = 0.9  # 实体预测任务的权重
-    args.pre_type = "all"  # 预训练类型
-    args.add_static_graph = True  # 是否使用静态图信息
-    args.temperature = 0.03  # 对比学习的温度
-    args.batch_size = 32  # 批量大小
-    args.use_cl = True  # 是否使用显示时间对比学习
+        def write(self, message):
+            self.terminal.write(message)
+            self.log.write(message)
+            self.log.flush()
+
+        def flush(self):
+            self.terminal.flush()
+            self.log.flush()
+
+    sys.stdout = Logger(log_file)
+    sys.stderr = sys.stdout  # 错误信息也一起捕获
+
+    # === 结束设置 ===
+
+
+    # 若未传入命令行参数，则使用项目内置默认实验配置。
+    if len(sys.argv) == 1:
+        args.dataset = "ICEWS14"  # 数据集名称
+        args.train_history_len = 7  # 训练历史长度
+        args.test_history_len = 7  # 测试历史长度
+        args.dilate_len = 1  # 扩张历史图长度
+        args.lr = 0.001  # 学习率
+        args.n_layers = 2  # 传播层数
+        args.evaluate_every = 1  # 每n轮进行评估
+        args.gpu = 0  # GPU ID
+        args.n_hidden = 200  # 隐藏单元数量
+        args.self_loop = True  # 是否使用自环
+        args.decoder = "convtranse"  # 解码器类型
+        args.encoder = "uvrgcn"  # 编码器类型
+        args.layer_norm = True  # 是否使用层归一化
+        args.weight = 0.5  # 静态约束权重
+        args.entity_prediction = True  # 是否添加实体预测损失
+        args.angle = 10  # 演变速度
+        args.discount = 1  # 静态约束的折扣
+        args.pre_weight = 0.9  # 实体预测任务的权重
+        args.pre_type = "all"  # 预训练类型
+        args.add_static_graph = True  # 是否使用静态图信息
+        args.temperature = 0.03  # 对比学习的温度
+        args.batch_size = 32  # 批量大小
+        args.use_cl = True  # 是否使用显示时间对比学习
 
     print(args)
     args.__dict__["test_history_len"] = args.__dict__["train_history_len"]
 
+    # ======= 把所有参数信息记录到 args.log ========
+    with open(args_file, "w", encoding="utf-8") as f:
+        for k, v in vars(args).items():
+            f.write(f"{k}: {v}\n")
+    # ==========================================
 
     run_experiment(args)
 

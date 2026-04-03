@@ -22,23 +22,23 @@ class BaseRGCN(nn.Module):
         print("use layer :{}".format(encoder_name))
         self.rel_emb = rel_emb
         self.opn = opn
-        # create rgcn layers
+        # 统一构建输入层/隐藏层/输出层骨架，具体算子在子类中实现。
         self.build_model()
-        # create initial features
+        # 预留节点初始特征接口（如 id embedding / one-hot）。
         self.features = self.create_features()
 
     def build_model(self):
         self.layers = nn.ModuleList()
-        # i2h
+        # i2h: 输入投影层
         i2h = self.build_input_layer()
         if i2h is not None:
             self.layers.append(i2h)
-        # h2h
+        # h2h: 多层消息传递主体
         for idx in range(self.num_hidden_layers):
 
             h2h = self.build_hidden_layer(idx)
             self.layers.append(h2h)
-        # h2o
+        # h2o: 输出层（可选）
         h2o = self.build_output_layer()
         if h2o is not None:
             self.layers.append(h2o)

@@ -53,6 +53,7 @@ class RGCNCell(BaseRGCN):
 
 
     def forward(self, g, init_ent_emb, init_rel_emb, pm_pd, lg):
+        # 局部历史图编码器: 在每个时间步更新实体表示。
         if self.encoder_name == "uvrgcn" or self.encoder_name == "kbat" or self.encoder_name == "compgcn":
             node_id = g.ndata['id'].squeeze()
             g.ndata['h'] = init_ent_emb[node_id]
@@ -124,7 +125,7 @@ class RecurrentRGCN(nn.Module):
                  num_hidden_layers=1, dropout=0, self_loop=False, skip_connect=False, layer_norm=False, input_dropout=0, 
                  hidden_dropout=0, feat_dropout=0, aggregation='cat', weight=1,pre_weight=0.7, discount=0, angle=0, use_static=False, pre_type = 'short', 
                  use_cl= False, temperature=0.007, entity_prediction=False, relation_prediction=False, use_cuda=False,
-                 gpu = 0, analysis=False):
+                 gpu = 0, inference_hops=1, analysis=False):
         super(RecurrentRGCN, self).__init__()
 
         self.decoder_name = decoder_name
@@ -143,10 +144,13 @@ class RecurrentRGCN(nn.Module):
         self.relation_evolve = False
         self.weight = weight
         self.static_alpha = 1e-5
+        # pre_weight 用于局部演化流与全局历史流的融合权重，是双流解耦后的关键控制参数。
         self.pre_weight = pre_weight
         self.discount = discount
         self.use_static = use_static
+        # pre_type=all 时启用“局部+全局”双流预测路径。
         self.pre_type = pre_type
+        # use_cl 控制跨流对比学习，提升多时间尺度表示一致性。
         self.use_cl = use_cl
         self.temp =temperature
         self.angle = angle
@@ -154,8 +158,12 @@ class RecurrentRGCN(nn.Module):
         self.entity_prediction = entity_prediction
         self.emb_rel = None
         self.gpu = gpu
+        # 推理跳数元信息，仅用于记录实验配置，不参与计算图与梯度更新。
+        self.inference_hops = int(inference_hops)
 
+        # 查询构造层: 将实体自身表示与关系池化表示拼接为 query-guided mask。
         self.w1 = nn.Linear(self.h_dim*2, self.h_dim)
+        # 查询门控与时间编码相关参数。
         
         self.w2 = nn.Linear(self.h_dim, self.h_dim)
         self.w3 = nn.Linear(self.h_dim, self.h_dim)
@@ -165,6 +173,7 @@ class RecurrentRGCN(nn.Module):
         self.w7 = nn.Linear(self.h_dim, self.h_dim)
         self.w_cl = nn.Linear(self.h_dim*2, self.h_dim)
 
+        # 时间相位参数: 用于构造演化阶段感知编码 cos(w*t+b)。
         self.weight_t2 = nn.parameter.Parameter(torch.randn(1, h_dim))
         self.bias_t2 = nn.parameter.Parameter(torch.randn(1, h_dim))
 
@@ -172,17 +181,21 @@ class RecurrentRGCN(nn.Module):
         self.weight_2 = nn.Linear(self.h_dim*2, self.h_dim)
         self.bias = nn.Parameter(torch.zeros(1))
 
+        # 关系/实体打分门相关参数，保留扩展空间（当前主要使用 w1/w2/w4/w5/w_cl）。
         self.weight_3 = nn.Linear(self.h_dim, 1)
         self.weight_4 = nn.Linear(self.h_dim, 1)
         self.bias_r = nn.Parameter(torch.zeros(1))
 
+        # 基础关系原型向量，后续在每个时间步通过 time gate 生成动态关系表示 hr。
         self.emb_rel = torch.nn.Parameter(torch.Tensor(self.num_rels * 2, self.h_dim), requires_grad=True).float()
         torch.nn.init.xavier_normal_(self.emb_rel)
 
+        # 动态实体初始表示，将被历史图流递推更新。
         self.dynamic_emb = torch.nn.Parameter(torch.Tensor(num_ents, h_dim), requires_grad=True).float()
         torch.nn.init.normal_(self.dynamic_emb)
 
         if self.use_static:
+            # 静态属性图分支: 对应 paper_mapping 3.3.3.1。
             self.words_emb = torch.nn.Parameter(torch.Tensor(self.num_words, h_dim), requires_grad=True).float()
             torch.nn.init.xavier_normal_(self.words_emb)
             self.statci_rgcn_layer = RGCNBlockLayer(self.h_dim, self.h_dim, self.num_static_rels*2, num_bases,
@@ -227,19 +240,22 @@ class RecurrentRGCN(nn.Module):
         self.rgat_layer = RGAT(self.h_dim, self.h_dim, activation=F.rrelu, dropout=dropout, self_loop=True)
         self.projection_model = MLPLinear(self.h_dim, self.h_dim)
 
+        # 时间门控参数: 把关系局部统计 x_input 与关系原型 emb_rel 做动态融合。
         self.time_gate_weight = nn.Parameter(torch.Tensor(h_dim, h_dim))    
         nn.init.xavier_uniform_(self.time_gate_weight, gain=nn.init.calculate_gain('relu'))
         self.time_gate_bias = nn.Parameter(torch.Tensor(h_dim))
         nn.init.zeros_(self.time_gate_bias)   
 
+        # 预留的预测门控参数，可扩展到更细粒度的多流融合策略。
         self.pre_gate_weight = nn.Parameter(torch.Tensor(h_dim, h_dim))    
         nn.init.xavier_uniform_(self.pre_gate_weight, gain=nn.init.calculate_gain('relu'))
         # self.pre_gate_weight = nn.Parameter(torch.Tensor(h_dim))
         # nn.init.xavier_uniform_(self.pre_gate_weight, gain=nn.init.calculate_gain('relu'))                      
 
-        # GRU cell for relation evolving
+        # 实体/关系双通道时间递推单元，对应 DSPN-CL 中结构演化流与关系交互流。
         self.entity_cell = nn.GRUCell(self.h_dim, self.h_dim)
         self.relation_cell = nn.GRUCell(self.h_dim, self.h_dim)
+        # GRU 分别承担实体状态与关系状态的时间递推。
 
         # decoder
         if decoder_name == "convtranse":
@@ -261,7 +277,7 @@ class RecurrentRGCN(nn.Module):
         self.st_static_emb = torch.nn.Parameter(torch.Tensor(num_ents, self.h_dim), requires_grad=True).float()
         torch.nn.init.normal_(self.st_static_emb)
     def get_dynamic_emb(self,t):
-        # return self.static_emb
+        # 趋势项 + 周期项时间编码: 让实体初态具备“阶段位置”与“周期扰动”双信息。
         timevec = self.alpha * self.alpha_t*t + (1-self.alpha) * torch.cos(2 * self.pi * self.beta_t*t)
         attn = torch.cat([self.st_static_emb,timevec],1)
         return torch.mm(attn, self.temporal_w)
@@ -321,6 +337,7 @@ class RecurrentRGCN(nn.Module):
 
     def forward(self,sub_graph,T_idx, query_mask, g_list, static_graph ,t ,input_list,num_nodes, use_cuda):
         if self.use_static:
+            # 1) 静态属性图卷积: 生成静态语义锚点 static_emb。
             static_graph = static_graph.to(self.gpu)
             if self.use_cl:
                 dynamic_emb = self.get_dynamic_emb(t)
@@ -346,12 +363,14 @@ class RecurrentRGCN(nn.Module):
         # his_emb = his_att*self.his_ent
         # his_emb = F.normalize(his_emb)
 
+        # history_embs: 局部实体演化流；his_rel_embs: 局部关系演化流；his_emb/his_r_emb: 全局历史流。
         history_embs = []
         att_embs = []
         his_temp_embs =[]
         his_rel_embs =[]
         if self.pre_type=="all":
             for i, g in enumerate(g_list):
+                # 2) 局部历史建模: 每个历史快照构建 pm_pd 与 line graph。
                 g_trilist = input_list[i]
                 inverse_test_triplets = g_trilist[:, [2, 1, 0]]
                 inverse_test_triplets[:, 1] = inverse_test_triplets[:, 1] + self.num_rels  #
@@ -363,14 +382,16 @@ class RecurrentRGCN(nn.Module):
                 lg = g.line_graph(backtracking=False)
 
                 if i == 0:
-                    # -----------------全局历史建模-------------------------------------
+                    # 3) 全局历史建模: 首步对累计历史做编码，对应 3.3.3.2。
                     self.his_ent, subg_index = self.all_GCN(self.h, sub_graph, use_cuda, pm_pd, lg)  # 全局历史实体嵌入his_ent
                     his_r_emb = F.normalize(self.emb_rel)  # 全局历史关系嵌入his_r_emb
                     his_att = F.softmax(self.w5(query_mask + self.his_ent), dim=1)
                     his_emb = his_att * self.his_ent
                     his_emb = F.normalize(his_emb)
 
+                # t2 表示距离当前时刻的相对距离，值越大表示更早历史。
                 t2 = len(g_list)-i+1
+                # 4) 相对时间相位注入: 将时间距离编码注入实体状态。
                 h_t = torch.cos(self.weight_t2 * t2 + self.bias_t2).repeat(self.num_ents,1)
                 self.h =self.w4(torch.concat([self.h,h_t],dim=1))
                 temp_e = self.h[g.r_to_e]
@@ -379,6 +400,7 @@ class RecurrentRGCN(nn.Module):
                     x = temp_e[span[0]:span[1],:]
                     x_mean = torch.mean(x, dim=0, keepdim=True)
                     x_input[r_idx] = x_mean
+                # 5) 关系门控更新: 将局部统计(x_input)与关系原型(emb_rel)融合，得到阶段感知关系表示 hr。
                 x_input = self.emb_rel + x_input
                 current_h = self.rgcn.forward(g, self.h, [self.emb_rel, self.emb_rel], pm_pd, lg)
                 current_h = F.normalize(current_h) if self.layer_norm else current_h
@@ -395,6 +417,7 @@ class RecurrentRGCN(nn.Module):
                     self.h_0 = F.normalize(self.h_0) if self.layer_norm else self.h_0
                     # self.hr = self.relation_cell(x_input, self.hr)  # 第2层输出==下一时刻第一层输入
                     # self.hr = F.normalize(self.hr) if self.layer_norm else self.hr
+                # time_weight 是关系流的核心“解耦阀门”: 保留长期先验 or 放大短期波动。
                 time_weight = F.sigmoid(torch.mm(x_input, self.time_gate_weight) + self.time_gate_bias)
                 self.hr = time_weight * x_input + (1-time_weight) * self.emb_rel
                 self.hr = F.normalize(self.hr) if self.layer_norm else self.hr
@@ -404,7 +427,9 @@ class RecurrentRGCN(nn.Module):
                 self.h = self.h_0
                 att_emb = att_e*self.h_0
                 att_embs.append(att_emb.unsqueeze(0))
+            # 对多时间步局部实体流做查询引导聚合，避免无关历史主导预测。
             att_ent = torch.mean(torch.concat(att_embs,dim=0),dim=0)
+            # 6) 跨步聚合: 查询门控后的历史平均 + 最新状态残差。
             att_ent = F.normalize(att_ent)
             history_emb = att_ent+history_embs[-1]
             history_emb = F.normalize(history_emb) if self.layer_norm else history_emb
@@ -419,7 +444,7 @@ class RecurrentRGCN(nn.Module):
         with torch.no_grad():
             all_triples = test_triplets
 
-            #-----------------查询数据处理-------------------------------------
+            # 查询侧关系池化: 从 (s, r_set) 构造 query mask。
             uniq_e = que_pair[0]
             r_len = que_pair[1]
             r_idx = que_pair[2]
@@ -439,6 +464,7 @@ class RecurrentRGCN(nn.Module):
             embedding, _, r_emb, his_emb, his_r_emb,_,_,_ = self.forward(sub_graph,T_id, query_mask,test_graph, static_graph, tlist[0],input_list,num_nodes, use_cuda)
 
             if self.pre_type == "all":
+                # 解码阶段融合局部实体流与全局历史流。
 
                 scores_ob, _= self.decoder_ob.forward(embedding, r_emb, all_triples,  his_emb, self.pre_weight, self.pre_type)
                 score_seq = F.softmax(scores_ob, dim=1)
@@ -462,7 +488,7 @@ class RecurrentRGCN(nn.Module):
 
         all_triples = triples
 
-        ### --------------查询数据处理-----------------------
+        # 查询构造与门控输入准备。
         uniq_e = que_pair[0]
         r_len = que_pair[1]
         r_idx = que_pair[2]
@@ -489,6 +515,7 @@ class RecurrentRGCN(nn.Module):
 
 
         if self.pre_type == "all":
+            # 双流融合后的实体预测主损失: 局部流 embedding + 全局流 his_emb。
             scores_ob, _= self.decoder_ob.forward(embedding, r_emb, all_triples, his_emb,self.pre_weight, self.pre_type)
             # score_seq = F.softmax(scores_ob, dim=1)
             # score_en = score_seq
@@ -503,8 +530,10 @@ class RecurrentRGCN(nn.Module):
             loss_rel += self.loss_r(score_rel, all_triples[:, 1])
 
         if self.use_cl and self.pre_type=="all":
+            # 跨流交叉对比学习: 对齐“全局历史流”与“局部演化流”，缓解多时间尺度语义混叠。
             for id, evolve_emb in enumerate(his_temp_embs):
                 t3 = len(his_temp_embs)-id+1
+                # query/query2 分别来自全局视角与局部视角，包含实体与关系联合语义。
                 query = torch.concat([self.his_ent[all_triples[:, 0]],his_r_emb[all_triples[:, 1]]],dim=1)
                 query2 = torch.concat([evolve_emb[all_triples[:, 0]], his_rel_embs[id][all_triples[:, 1]]],dim=1)
                 x1 = self.w_cl(query)
@@ -512,6 +541,7 @@ class RecurrentRGCN(nn.Module):
                 loss_cl += self.get_loss_conv(x1, x2)
 
             for time_step, evolve_emb in enumerate(history_embs):
+                # 静态角度约束: 限制表示漂移速度，保证长时序训练稳定性。
                 angle = 90 // len(history_embs)
                 # step = (self.angle * math.pi / 180) * (time_step + 1)
                 step = (self.angle * math.pi / 180) * (time_step + 1)
@@ -528,6 +558,7 @@ class RecurrentRGCN(nn.Module):
         return loss_ent, loss_rel, loss_cp, loss_cl
 
     def all_GCN(self,ent_emb, sub_graph, use_cuda, pm_pd, lg):
+        # 全局历史图编码器: 累计历史语义主干，用于与局部流形成双流互补。
         sub_graph = sub_graph.to(self.gpu)
         sub_graph.ndata['h'] = ent_emb 
         his_emb = self.his_rgcn_layer.forward(sub_graph, ent_emb, [self.emb_rel, self.emb_rel], pm_pd, lg)
@@ -537,6 +568,10 @@ class RecurrentRGCN(nn.Module):
         return F.normalize(his_emb),subg_index
     
     def get_loss_conv(self, ent1_emb, ent2_emb):
+        # SimCLR 风格对比损失（双向 + 同视角）:
+        # 1) pred1/pred2 对齐跨流同一样本;
+        # 2) pred3/pred4 约束各自流内部结构;
+        # 3) 通过 temperature 控制对齐难度，避免过硬匹配导致训练不稳。
 
         loss_fn = nn.CrossEntropyLoss().to(self.gpu)
         z1 = self.projection_model(ent1_emb)
